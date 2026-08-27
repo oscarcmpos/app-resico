@@ -6,6 +6,10 @@ import pdfplumber
 import re
 from supabase import create_client, Client
 
+# Inicializar variable de sesión para el botón de Limpiar/Regresar
+if "reset_key" not in st.session_state:
+    st.session_state.reset_key = 0
+
 # ==========================================
 # 0. CONEXIÓN A SUPABASE
 # ==========================================
@@ -115,7 +119,6 @@ def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
         
         if tipo == 'P': metodo = 'Pago (Complemento)'
             
-        # Logica inteligente: Si es ingreso, queremos ver al cliente (Receptor). Si es gasto, al proveedor (Emisor).
         if tipo_archivo == 'ingreso':
             nodo = root.find('cfdi:Receptor', ns)
             nombre = nodo.attrib.get('Nombre', 'Cliente Desconocido') if nodo is not None else 'Cliente Desconocido'
@@ -205,7 +208,15 @@ if supabase is None:
     st.error("⚠️ No se pudo conectar a la base de datos.")
     st.stop()
 
-st.title("🧮 Sistema Contable Automatizado RESICO")
+# Header con botón de reinicio
+col_titulo, col_boton = st.columns([4, 1])
+with col_titulo:
+    st.title("🧮 Sistema Contable Automatizado RESICO")
+with col_boton:
+    st.write("") # Espaciado
+    if st.button("🔄 Limpiar Todo / Regresar", use_container_width=True):
+        st.session_state.reset_key += 1
+        st.rerun()
 
 tab_calc, tab_visor, tab_historial = st.tabs(["📊 Calculadora Mensual", "📄 Visor Avanzado de CFDI", "📑 Historial y Acuses"])
 
@@ -219,17 +230,22 @@ with tab_calc:
         lista_clientes = respuesta_clientes.data if respuesta_clientes.data else []
         nombres_clientes = [c['nombre'] for c in lista_clientes]
         
-        if not nombres_clientes:
-            st.warning("No tienes clientes registrados. Crea uno para poder guardar cálculos.")
-            with st.expander("➕ Agregar Nuevo Cliente"):
+        cliente_sel = st.selectbox("Cliente Actual", nombres_clientes) if nombres_clientes else None
+            
+        with st.expander("➕ Agregar Nuevo Cliente" if nombres_clientes else "⚠️ Primero agrega un Cliente"):
+            with st.form("form_cliente", clear_on_submit=True):
                 nuevo_cli = st.text_input("Nombre / Razón Social")
-                nuevo_rfc = st.text_input("RFC")
-                if st.button("Registrar Cliente"):
-                    supabase.table("clientes").insert({"nombre": nuevo_cli, "rfc": nuevo_rfc}).execute()
-                    st.rerun()
-            cliente_sel = None
-        else:
-            cliente_sel = st.selectbox("Cliente", nombres_clientes)
+                nuevo_rfc = st.text_input("RFC (Debe ser único)")
+                if st.form_submit_button("Registrar Cliente"):
+                    if not nuevo_cli.strip() or not nuevo_rfc.strip():
+                        st.error("⚠️ El Nombre y el RFC son obligatorios.")
+                    else:
+                        try:
+                            supabase.table("clientes").insert({"nombre": nuevo_cli.strip(), "rfc": nuevo_rfc.strip()}).execute()
+                            st.success("✅ Cliente registrado exitosamente. La página se actualizará...")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"⚠️ Error: Es posible que el RFC '{nuevo_rfc}' ya esté registrado.")
     
     with col_mes:
         mes_sel = st.selectbox("Mes", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
@@ -241,10 +257,10 @@ with tab_calc:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. Ingresos (XML Emitidos)")
-        xml_ingresos = st.file_uploader("Sube facturas emitidas (Se filtrarán las NO-RESICO)", type=['xml'], accept_multiple_files=True, key="ing")
+        xml_ingresos = st.file_uploader("Sube facturas emitidas (Se filtrarán las NO-RESICO)", type=['xml'], accept_multiple_files=True, key=f"ing_{st.session_state.reset_key}")
     with col2:
         st.subheader("2. Gastos (XML Recibidos)")
-        xml_gastos = st.file_uploader("Sube facturas de gastos para el IVA", type=['xml'], accept_multiple_files=True, key="gas")
+        xml_gastos = st.file_uploader("Sube facturas de gastos para el IVA", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
     if xml_ingresos:
         datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
@@ -309,8 +325,11 @@ with tab_calc:
                         "ingresos_base": float(total_ingresos), "isr_determinado": float(isr_a_pagar),
                         "iva_cargo_favor": float(iva_neto), "estatus": "Calculando"
                     }
-                    supabase.table("historial_calculos").insert(datos_insertar).execute()
-                    st.success(f"Cálculo guardado exitosamente. Ya puedes ir a 'Historial y Acuses' a subir el PDF.")
+                    try:
+                        supabase.table("historial_calculos").insert(datos_insertar).execute()
+                        st.success(f"Cálculo guardado exitosamente. Ya puedes ir a 'Historial y Acuses' a subir el PDF.")
+                    except Exception as e:
+                        st.error("Error al guardar el cálculo en la base de datos.")
 
             with col_btn2:
                 diccionario_totales = {
@@ -326,7 +345,6 @@ with tab_calc:
 with tab_visor:
     st.header("🔍 Visor de XML con Filtros Inteligentes")
     
-    # 1. Elegir entre Ingresos y Egresos
     tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
     
     archivos_a_mostrar = []
@@ -336,30 +354,25 @@ with tab_visor:
     if tipo_visor == "Emitidas (Ingresos)":
         if 'xml_ingresos' in locals() and xml_ingresos: archivos_a_mostrar = xml_ingresos
         tipo_str = 'ingreso'
-        label_busqueda = "👤 Buscar Cliente:"
+        label_busqueda = "👤 Buscar Cliente (Autocompletado):"
     else:
         if 'xml_gastos' in locals() and xml_gastos: archivos_a_mostrar = xml_gastos
         tipo_str = 'gasto'
-        label_busqueda = "🏢 Buscar Proveedor:"
+        label_busqueda = "🏢 Buscar Proveedor (Autocompletado):"
     
     if archivos_a_mostrar:
         metadatos = [obtener_metadatos_basicos(f, tipo_str) for f in archivos_a_mostrar]
         metadatos = [m for m in metadatos if m is not None]
         df_meta = pd.DataFrame(metadatos)
         
-        # Extraer lista de nombres únicos (Clientes o Proveedores)
         nombres_unicos = sorted(df_meta['entidad'].unique().tolist())
         
-        # Panel de Filtros
         with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
             f_col1, f_col2, f_col3 = st.columns(3)
-            
-            # Autocompletado nativo usando selectbox
             filtro_entidad = f_col1.selectbox(label_busqueda, ["Todos"] + nombres_unicos)
             filtro_metodo = f_col2.selectbox("🏷️ Método de Pago:", ["Todos", "PUE", "PPD", "Pago (Complemento)"])
             filtro_monto = f_col3.number_input("💵 Buscar Monto Exacto (0 = omitir):", min_value=0.0, step=100.0)
             
-            # Aplicar filtros
             if filtro_entidad != "Todos":
                 df_meta = df_meta[df_meta['entidad'] == filtro_entidad]
             if filtro_metodo != "Todos":
@@ -371,7 +384,6 @@ with tab_visor:
         
         if not df_meta.empty:
             df_meta = df_meta.sort_values(by='fecha', ascending=False)
-            
             opciones_mostrar = df_meta['display'].tolist()
             seleccion_display = st.selectbox("📄 Selecciona un CFDI para ver el desglose:", opciones_mostrar)
             
@@ -455,52 +467,55 @@ with tab_historial:
         cliente_hist = st.selectbox("Selecciona Cliente", nombres_clientes, key="cli_hist")
         cliente_id_hist = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_hist)
         
-        historial_db = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id_hist).order("anio", desc=True).order("mes", desc=True).execute()
-        
-        if historial_db.data:
-            df_historial = pd.DataFrame(historial_db.data)
-            df_historial = df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]]
+        try:
+            historial_db = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id_hist).order("anio", desc=True).order("mes", desc=True).execute()
             
-            for col in ["ingresos_base", "isr_determinado", "iva_cargo_favor"]:
-                df_historial[col] = df_historial[col].apply(lambda x: f"${x:,.2f}")
+            if historial_db.data:
+                df_historial = pd.DataFrame(historial_db.data)
+                df_historial = df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]]
                 
-            st.dataframe(df_historial, use_container_width=True)
-            
-            st.divider()
-            st.subheader("Subir Acuse de Declaración (PDF)")
-            st.write("Selecciona el mes que acabas de guardar para adjuntarle su acuse de recibo del SAT.")
-            mes_acuse = st.selectbox("Mes a verificar", df_historial["mes"].unique())
-            anio_acuse = st.selectbox("Año a verificar", df_historial["anio"].unique())
-            
-            acuse_pdf = st.file_uploader(f"Sube el acuse del SAT para {mes_acuse} {anio_acuse}", type=['pdf'])
-            
-            if acuse_pdf:
-                with st.spinner("Leyendo documento del SAT..."):
-                    try:
-                        texto_pdf = ""
-                        with pdfplumber.open(acuse_pdf) as pdf:
-                            for pagina in pdf.pages:
-                                texto_pdf += pagina.extract_text() + "\n"
-                        
-                        cantidades_encontradas = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
-                        
-                        if cantidades_encontradas:
-                            st.success(f"Se extrajeron montos del PDF. Último monto detectado: ${cantidades_encontradas[-1]}")
-                            st.write("Verifica que cuadre con tu cálculo inicial.")
+                for col in ["ingresos_base", "isr_determinado", "iva_cargo_favor"]:
+                    df_historial[col] = df_historial[col].apply(lambda x: f"${x:,.2f}")
+                    
+                st.dataframe(df_historial, use_container_width=True)
+                
+                st.divider()
+                st.subheader("Subir Acuse de Declaración (PDF)")
+                st.write("Selecciona el mes que acabas de guardar para adjuntarle su acuse de recibo del SAT.")
+                mes_acuse = st.selectbox("Mes a verificar", df_historial["mes"].unique())
+                anio_acuse = st.selectbox("Año a verificar", df_historial["anio"].unique())
+                
+                acuse_pdf = st.file_uploader(f"Sube el acuse del SAT para {mes_acuse} {anio_acuse}", type=['pdf'], key=f"pdf_{st.session_state.reset_key}")
+                
+                if acuse_pdf:
+                    with st.spinner("Leyendo documento del SAT..."):
+                        try:
+                            texto_pdf = ""
+                            with pdfplumber.open(acuse_pdf) as pdf:
+                                for pagina in pdf.pages:
+                                    texto_pdf += pagina.extract_text() + "\n"
                             
-                            if st.button("✅ Cuadra perfecto. Marcar como Declarado", use_container_width=True):
-                                registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", anio_acuse).execute()
-                                if registro.data:
-                                    supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
-                                    st.balloons()
-                                    st.success("¡Mes cerrado y actualizado en la base de datos! Refresca la página para ver el cambio.")
-                        else:
-                            st.warning("No se pudo extraer automáticamente una cantidad exacta con formato moneda. Aquí tienes el texto para revisión manual:")
-                            with st.expander("Ver texto del acuse"):
-                                st.text(texto_pdf)
-                    except Exception as e:
-                        st.error(f"Error al leer el PDF: {e}")
-        else:
-            st.info("Aún no has guardado cálculos para este cliente.")
+                            cantidades_encontradas = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
+                            
+                            if cantidades_encontradas:
+                                st.success(f"Se extrajeron montos del PDF. Último monto detectado: ${cantidades_encontradas[-1]}")
+                                st.write("Verifica que cuadre con tu cálculo inicial.")
+                                
+                                if st.button("✅ Cuadra perfecto. Marcar como Declarado", use_container_width=True):
+                                    registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", anio_acuse).execute()
+                                    if registro.data:
+                                        supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
+                                        st.balloons()
+                                        st.success("¡Mes cerrado y actualizado! Puedes presionar 'Limpiar Todo / Regresar' para empezar de nuevo.")
+                            else:
+                                st.warning("No se pudo extraer automáticamente una cantidad exacta con formato moneda. Aquí tienes el texto para revisión manual:")
+                                with st.expander("Ver texto del acuse"):
+                                    st.text(texto_pdf)
+                        except Exception as e:
+                            st.error(f"Error al leer el PDF: {e}")
+            else:
+                st.info("Aún no has guardado cálculos para este cliente. Ve a la Pestaña 1 y presiona 'Guardar Cálculo en Base de Datos'.")
+        except Exception as e:
+            st.error("Error al cargar el historial.")
     else:
         st.info("Registra un cliente en la pestaña 1 para ver el historial.")
