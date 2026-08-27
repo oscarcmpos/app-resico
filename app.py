@@ -101,7 +101,7 @@ def generar_excel(df_ingresos, df_gastos, totales):
 # ==========================================
 # 2. FUNCIONES DE EXTRACCIÓN AVANZADA (VISOR DE XML)
 # ==========================================
-def obtener_metadatos_basicos(archivo_subido):
+def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
     try:
         archivo_subido.seek(0)
         tree = ET.parse(archivo_subido)
@@ -115,13 +115,18 @@ def obtener_metadatos_basicos(archivo_subido):
         
         if tipo == 'P': metodo = 'Pago (Complemento)'
             
-        emisor = root.find('cfdi:Emisor', ns)
-        nombre = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
+        # Logica inteligente: Si es ingreso, queremos ver al cliente (Receptor). Si es gasto, al proveedor (Emisor).
+        if tipo_archivo == 'ingreso':
+            nodo = root.find('cfdi:Receptor', ns)
+            nombre = nodo.attrib.get('Nombre', 'Cliente Desconocido') if nodo is not None else 'Cliente Desconocido'
+        else:
+            nodo = root.find('cfdi:Emisor', ns)
+            nombre = nodo.attrib.get('Nombre', 'Proveedor Desconocido') if nodo is not None else 'Proveedor Desconocido'
         
         return {
             "nombre_archivo": archivo_subido.name,
             "fecha": fecha,
-            "emisor": nombre,
+            "entidad": nombre,
             "total": float(total),
             "metodo": metodo,
             "display": f"{fecha} | {nombre} | ${float(total):,.2f} | {metodo}"
@@ -321,26 +326,42 @@ with tab_calc:
 with tab_visor:
     st.header("🔍 Visor de XML con Filtros Inteligentes")
     
-    todos_los_archivos = []
-    if 'xml_ingresos' in locals() and xml_ingresos: todos_los_archivos.extend(xml_ingresos)
-    if 'xml_gastos' in locals() and xml_gastos: todos_los_archivos.extend(xml_gastos)
+    # 1. Elegir entre Ingresos y Egresos
+    tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
     
-    if todos_los_archivos:
-        # Extraer metadatos para los filtros
-        metadatos = [obtener_metadatos_basicos(f) for f in todos_los_archivos]
+    archivos_a_mostrar = []
+    tipo_str = ""
+    label_busqueda = ""
+    
+    if tipo_visor == "Emitidas (Ingresos)":
+        if 'xml_ingresos' in locals() and xml_ingresos: archivos_a_mostrar = xml_ingresos
+        tipo_str = 'ingreso'
+        label_busqueda = "👤 Buscar Cliente:"
+    else:
+        if 'xml_gastos' in locals() and xml_gastos: archivos_a_mostrar = xml_gastos
+        tipo_str = 'gasto'
+        label_busqueda = "🏢 Buscar Proveedor:"
+    
+    if archivos_a_mostrar:
+        metadatos = [obtener_metadatos_basicos(f, tipo_str) for f in archivos_a_mostrar]
         metadatos = [m for m in metadatos if m is not None]
         df_meta = pd.DataFrame(metadatos)
+        
+        # Extraer lista de nombres únicos (Clientes o Proveedores)
+        nombres_unicos = sorted(df_meta['entidad'].unique().tolist())
         
         # Panel de Filtros
         with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
             f_col1, f_col2, f_col3 = st.columns(3)
-            filtro_texto = f_col1.text_input("🔎 Buscar por Proveedor / Cliente:")
+            
+            # Autocompletado nativo usando selectbox
+            filtro_entidad = f_col1.selectbox(label_busqueda, ["Todos"] + nombres_unicos)
             filtro_metodo = f_col2.selectbox("🏷️ Método de Pago:", ["Todos", "PUE", "PPD", "Pago (Complemento)"])
-            filtro_monto = f_col3.number_input("💵 Buscar Monto Exacto (Dejar 0 para omitir):", min_value=0.0, step=100.0)
+            filtro_monto = f_col3.number_input("💵 Buscar Monto Exacto (0 = omitir):", min_value=0.0, step=100.0)
             
             # Aplicar filtros
-            if filtro_texto:
-                df_meta = df_meta[df_meta['emisor'].str.contains(filtro_texto, case=False, na=False)]
+            if filtro_entidad != "Todos":
+                df_meta = df_meta[df_meta['entidad'] == filtro_entidad]
             if filtro_metodo != "Todos":
                 df_meta = df_meta[df_meta['metodo'] == filtro_metodo]
             if filtro_monto > 0:
@@ -349,15 +370,13 @@ with tab_visor:
         st.divider()
         
         if not df_meta.empty:
-            # Ordenar por fecha por defecto
             df_meta = df_meta.sort_values(by='fecha', ascending=False)
             
             opciones_mostrar = df_meta['display'].tolist()
             seleccion_display = st.selectbox("📄 Selecciona un CFDI para ver el desglose:", opciones_mostrar)
             
-            # Recuperar el archivo original basado en la selección
             nombre_archivo_seleccionado = df_meta[df_meta['display'] == seleccion_display]['nombre_archivo'].iloc[0]
-            archivo_activo = next(f for f in todos_los_archivos if f.name == nombre_archivo_seleccionado)
+            archivo_activo = next(f for f in archivos_a_mostrar if f.name == nombre_archivo_seleccionado)
             
             datos_visor = extraer_cfdi_completo(archivo_activo)
             
