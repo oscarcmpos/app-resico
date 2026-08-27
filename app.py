@@ -99,8 +99,36 @@ def generar_excel(df_ingresos, df_gastos, totales):
     return buffer.getvalue()
 
 # ==========================================
-# 2. FUNCIONES DE EXTRACCIÓN (VISOR DE XML)
+# 2. FUNCIONES DE EXTRACCIÓN AVANZADA (VISOR DE XML)
 # ==========================================
+def obtener_metadatos_basicos(archivo_subido):
+    try:
+        archivo_subido.seek(0)
+        tree = ET.parse(archivo_subido)
+        root = tree.getroot()
+        ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
+        
+        fecha = root.attrib.get('Fecha', '')[:10]
+        total = root.attrib.get('Total', '0.00')
+        tipo = root.attrib.get('TipoDeComprobante', '')
+        metodo = root.attrib.get('MetodoPago', 'N/A')
+        
+        if tipo == 'P': metodo = 'Pago (Complemento)'
+            
+        emisor = root.find('cfdi:Emisor', ns)
+        nombre = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
+        
+        return {
+            "nombre_archivo": archivo_subido.name,
+            "fecha": fecha,
+            "emisor": nombre,
+            "total": float(total),
+            "metodo": metodo,
+            "display": f"{fecha} | {nombre} | ${float(total):,.2f} | {metodo}"
+        }
+    except:
+        return None
+
 def extraer_cfdi_completo(archivo_subido):
     archivo_subido.seek(0)
     tree = ET.parse(archivo_subido)
@@ -153,16 +181,13 @@ def extraer_cfdi_completo(archivo_subido):
         traslados = impuestos.find('cfdi:Traslados', ns)
         if traslados is not None:
             for t in traslados.findall('cfdi:Traslado', ns):
-                if t.attrib.get('Impuesto') == '002':
-                    datos["iva_trasladado"] += float(t.attrib.get('Importe', '0.00'))
+                if t.attrib.get('Impuesto') == '002': datos["iva_trasladado"] += float(t.attrib.get('Importe', '0.00'))
                     
         retenciones = impuestos.find('cfdi:Retenciones', ns)
         if retenciones is not None:
             for r in retenciones.findall('cfdi:Retencion', ns):
-                if r.attrib.get('Impuesto') == '001':
-                    datos["isr_retenido"] += float(r.attrib.get('Importe', '0.00'))
-                elif r.attrib.get('Impuesto') == '002':
-                    datos["iva_retenido"] += float(r.attrib.get('Importe', '0.00'))
+                if r.attrib.get('Impuesto') == '001': datos["isr_retenido"] += float(r.attrib.get('Importe', '0.00'))
+                elif r.attrib.get('Impuesto') == '002': datos["iva_retenido"] += float(r.attrib.get('Importe', '0.00'))
                     
     return datos
 
@@ -172,16 +197,15 @@ def extraer_cfdi_completo(archivo_subido):
 st.set_page_config(page_title="App RESICO", layout="wide")
 
 if supabase is None:
-    st.error("⚠️ No se pudo conectar a la base de datos. Revisa que tu archivo .streamlit/secrets.toml esté bien configurado.")
+    st.error("⚠️ No se pudo conectar a la base de datos.")
     st.stop()
 
 st.title("🧮 Sistema Contable Automatizado RESICO")
 
-tab_calc, tab_visor, tab_historial = st.tabs(["📊 Calculadora Mensual", "📄 Visor de CFDI", "📑 Historial y Acuses"])
+tab_calc, tab_visor, tab_historial = st.tabs(["📊 Calculadora Mensual", "📄 Visor Avanzado de CFDI", "📑 Historial y Acuses"])
 
 # --- PESTAÑA 1: CALCULADORA ---
 with tab_calc:
-    # 1. Configuración del mes a calcular
     st.subheader("Configuración del Periodo")
     col_cli, col_mes, col_anio = st.columns(3)
     
@@ -189,7 +213,18 @@ with tab_calc:
         respuesta_clientes = supabase.table("clientes").select("*").execute()
         lista_clientes = respuesta_clientes.data if respuesta_clientes.data else []
         nombres_clientes = [c['nombre'] for c in lista_clientes]
-        cliente_sel = st.selectbox("Cliente", nombres_clientes) if nombres_clientes else st.selectbox("Cliente", ["Sin clientes"])
+        
+        if not nombres_clientes:
+            st.warning("No tienes clientes registrados. Crea uno para poder guardar cálculos.")
+            with st.expander("➕ Agregar Nuevo Cliente"):
+                nuevo_cli = st.text_input("Nombre / Razón Social")
+                nuevo_rfc = st.text_input("RFC")
+                if st.button("Registrar Cliente"):
+                    supabase.table("clientes").insert({"nombre": nuevo_cli, "rfc": nuevo_rfc}).execute()
+                    st.rerun()
+            cliente_sel = None
+        else:
+            cliente_sel = st.selectbox("Cliente", nombres_clientes)
     
     with col_mes:
         mes_sel = st.selectbox("Mes", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
@@ -201,7 +236,7 @@ with tab_calc:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. Ingresos (XML Emitidos)")
-        xml_ingresos = st.file_uploader("Sube facturas emitidas", type=['xml'], accept_multiple_files=True, key="ing")
+        xml_ingresos = st.file_uploader("Sube facturas emitidas (Se filtrarán las NO-RESICO)", type=['xml'], accept_multiple_files=True, key="ing")
     with col2:
         st.subheader("2. Gastos (XML Recibidos)")
         xml_gastos = st.file_uploader("Sube facturas de gastos para el IVA", type=['xml'], accept_multiple_files=True, key="gas")
@@ -210,7 +245,9 @@ with tab_calc:
         datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
         datos_ingresos = [d for d in datos_ingresos if d is not None] 
         
-        if datos_ingresos:
+        if not datos_ingresos:
+            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626) en el nodo Emisor, por lo que fueron descartados para proteger el cálculo.")
+        else:
             df_ingresos = pd.DataFrame(datos_ingresos)
             total_ingresos = df_ingresos["Subtotal"].sum()
             total_iva_trasladado = df_ingresos["IVA Trasladado"].sum()
@@ -252,32 +289,23 @@ with tab_calc:
             color_iva = "normal" if iva_neto < 0 else "inverse"
             c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.2f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
 
-            # Botones de Acción Final
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
-                if st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
-                    if lista_clientes:
-                        cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
-                        
-                        # Borrar si ya existía el mismo mes para sobreescribir
-                        viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
-                        if viejo.data:
-                            supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
-                        
-                        # Insertar nuevo cálculo
-                        datos_insertar = {
-                            "cliente_id": cliente_id,
-                            "mes": mes_sel,
-                            "anio": anio_sel,
-                            "ingresos_base": float(total_ingresos),
-                            "isr_determinado": float(isr_a_pagar),
-                            "iva_cargo_favor": float(iva_neto),
-                            "estatus": "Calculando"
-                        }
-                        supabase.table("historial_calculos").insert(datos_insertar).execute()
-                        st.success(f"Cálculo de {mes_sel} {anio_sel} guardado exitosamente para {cliente_sel}.")
+                if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
+                    cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
+                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
+                    if viejo.data:
+                        supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
+                    
+                    datos_insertar = {
+                        "cliente_id": cliente_id, "mes": mes_sel, "anio": anio_sel,
+                        "ingresos_base": float(total_ingresos), "isr_determinado": float(isr_a_pagar),
+                        "iva_cargo_favor": float(iva_neto), "estatus": "Calculando"
+                    }
+                    supabase.table("historial_calculos").insert(datos_insertar).execute()
+                    st.success(f"Cálculo guardado exitosamente. Ya puedes ir a 'Historial y Acuses' a subir el PDF.")
 
             with col_btn2:
                 diccionario_totales = {
@@ -287,31 +315,53 @@ with tab_calc:
                     'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
                 }
                 archivo_excel = generar_excel(df_ingresos, df_gastos, diccionario_totales)
-                
-                st.download_button(
-                    label="📥 Descargar Papeles de Trabajo (.xlsx)",
-                    data=archivo_excel,
-                    file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+                st.download_button("📥 Descargar Papeles de Trabajo (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-# --- PESTAÑA 2: VISOR DE XML ---
+# --- PESTAÑA 2: VISOR DE XML AVANZADO ---
 with tab_visor:
-    st.header("Visor de XML (Estilo Factura)")
+    st.header("🔍 Visor de XML con Filtros Inteligentes")
     
     todos_los_archivos = []
     if 'xml_ingresos' in locals() and xml_ingresos: todos_los_archivos.extend(xml_ingresos)
     if 'xml_gastos' in locals() and xml_gastos: todos_los_archivos.extend(xml_gastos)
     
     if todos_los_archivos:
-        nombres = [f.name for f in todos_los_archivos]
-        seleccion = st.selectbox("Selecciona un archivo XML para visualizar:", nombres)
+        # Extraer metadatos para los filtros
+        metadatos = [obtener_metadatos_basicos(f) for f in todos_los_archivos]
+        metadatos = [m for m in metadatos if m is not None]
+        df_meta = pd.DataFrame(metadatos)
         
-        archivo_activo = next(f for f in todos_los_archivos if f.name == seleccion)
-        datos_visor = extraer_cfdi_completo(archivo_activo)
+        # Panel de Filtros
+        with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
+            f_col1, f_col2, f_col3 = st.columns(3)
+            filtro_texto = f_col1.text_input("🔎 Buscar por Proveedor / Cliente:")
+            filtro_metodo = f_col2.selectbox("🏷️ Método de Pago:", ["Todos", "PUE", "PPD", "Pago (Complemento)"])
+            filtro_monto = f_col3.number_input("💵 Buscar Monto Exacto (Dejar 0 para omitir):", min_value=0.0, step=100.0)
+            
+            # Aplicar filtros
+            if filtro_texto:
+                df_meta = df_meta[df_meta['emisor'].str.contains(filtro_texto, case=False, na=False)]
+            if filtro_metodo != "Todos":
+                df_meta = df_meta[df_meta['metodo'] == filtro_metodo]
+            if filtro_monto > 0:
+                df_meta = df_meta[df_meta['total'] == filtro_monto]
+                
+        st.divider()
         
-        html_cfdi = f"""<div style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #333;">
+        if not df_meta.empty:
+            # Ordenar por fecha por defecto
+            df_meta = df_meta.sort_values(by='fecha', ascending=False)
+            
+            opciones_mostrar = df_meta['display'].tolist()
+            seleccion_display = st.selectbox("📄 Selecciona un CFDI para ver el desglose:", opciones_mostrar)
+            
+            # Recuperar el archivo original basado en la selección
+            nombre_archivo_seleccionado = df_meta[df_meta['display'] == seleccion_display]['nombre_archivo'].iloc[0]
+            archivo_activo = next(f for f in todos_los_archivos if f.name == nombre_archivo_seleccionado)
+            
+            datos_visor = extraer_cfdi_completo(archivo_activo)
+            
+            html_cfdi = f"""<div style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #333;">
 <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2e86c1; padding-bottom: 10px; margin-bottom: 20px;">
 <div>
 <h2 style="margin: 0; color: #2e86c1;">Factura Electrónica (CFDI)</h2>
@@ -344,44 +394,37 @@ with tab_visor:
 <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Valor Unitario</th>
 <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Importe</th>
 </tr>"""
-        for c in datos_visor['conceptos']:
-            html_cfdi += f"""<tr>
+            for c in datos_visor['conceptos']:
+                html_cfdi += f"""<tr>
 <td style="padding: 8px; text-align: center; border: 1px solid #ddd;">{c['cantidad']}</td>
 <td style="padding: 8px; text-align: left; border: 1px solid #ddd;">{c['descripcion']}</td>
 <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['valor_unitario']:,.2f}</td>
 <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['importe']:,.2f}</td>
 </tr>"""
-        html_cfdi += f"""</table>
+            html_cfdi += f"""</table>
 <div style="display: flex; justify-content: flex-end;">
 <div style="width: 320px; padding: 15px; background-color: #f0f8ff; border-radius: 5px; border: 1px solid #b0c4de;">
 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
 <strong>Subtotal:</strong> <span>${datos_visor['subtotal']:,.2f}</span>
 </div>"""
-
-        if datos_visor['descuento'] > 0:
-            html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Descuento:</strong> <span>-${datos_visor['descuento']:,.2f}</span>
-</div>"""
-        if datos_visor['iva_trasladado'] > 0:
-            html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-<strong>IVA (16%):</strong> <span>${datos_visor['iva_trasladado']:,.2f}</span>
-</div>"""
-        if datos_visor['isr_retenido'] > 0:
-            html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Retención ISR:</strong> <span>-${datos_visor['isr_retenido']:,.2f}</span>
-</div>"""
-        if datos_visor['iva_retenido'] > 0:
-            html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Retención IVA:</strong> <span>-${datos_visor['iva_retenido']:,.2f}</span>
-</div>"""
-
-        html_cfdi += f"""<div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 1px solid #ccc; padding-top: 5px; margin-top: 5px;">
+            if datos_visor['descuento'] > 0:
+                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
+<strong>Descuento:</strong> <span>-${datos_visor['descuento']:,.2f}</span></div>"""
+            if datos_visor['iva_trasladado'] > 0:
+                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+<strong>IVA (16%):</strong> <span>${datos_visor['iva_trasladado']:,.2f}</span></div>"""
+            if datos_visor['isr_retenido'] > 0:
+                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
+<strong>Retención ISR:</strong> <span>-${datos_visor['isr_retenido']:,.2f}</span></div>"""
+            if datos_visor['iva_retenido'] > 0:
+                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
+<strong>Retención IVA:</strong> <span>-${datos_visor['iva_retenido']:,.2f}</span></div>"""
+            html_cfdi += f"""<div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 1px solid #ccc; padding-top: 5px; margin-top: 5px;">
 <strong>Total:</strong> <strong>${datos_visor['total']:,.2f} {datos_visor['moneda']}</strong>
-</div>
-</div>
-</div>
-</div>"""
-        st.markdown(html_cfdi, unsafe_allow_html=True)
+</div></div></div></div>"""
+            st.markdown(html_cfdi, unsafe_allow_html=True)
+        else:
+            st.warning("No se encontraron CFDI que coincidan con los filtros de búsqueda.")
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para poder visualizarlos aquí.")
 
@@ -389,7 +432,7 @@ with tab_visor:
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
-    if lista_clientes:
+    if 'lista_clientes' in locals() and lista_clientes:
         cliente_hist = st.selectbox("Selecciona Cliente", nombres_clientes, key="cli_hist")
         cliente_id_hist = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_hist)
         
@@ -399,7 +442,6 @@ with tab_historial:
             df_historial = pd.DataFrame(historial_db.data)
             df_historial = df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]]
             
-            # Formato moneda para visualización
             for col in ["ingresos_base", "isr_determinado", "iva_cargo_favor"]:
                 df_historial[col] = df_historial[col].apply(lambda x: f"${x:,.2f}")
                 
@@ -407,6 +449,7 @@ with tab_historial:
             
             st.divider()
             st.subheader("Subir Acuse de Declaración (PDF)")
+            st.write("Selecciona el mes que acabas de guardar para adjuntarle su acuse de recibo del SAT.")
             mes_acuse = st.selectbox("Mes a verificar", df_historial["mes"].unique())
             anio_acuse = st.selectbox("Año a verificar", df_historial["anio"].unique())
             
@@ -420,7 +463,6 @@ with tab_historial:
                             for pagina in pdf.pages:
                                 texto_pdf += pagina.extract_text() + "\n"
                         
-                        # Buscar cantidades de "Total a pagar" o "Cantidad a cargo"
                         cantidades_encontradas = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
                         
                         if cantidades_encontradas:
@@ -428,7 +470,6 @@ with tab_historial:
                             st.write("Verifica que cuadre con tu cálculo inicial.")
                             
                             if st.button("✅ Cuadra perfecto. Marcar como Declarado", use_container_width=True):
-                                # Actualizar estatus en Supabase
                                 registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", anio_acuse).execute()
                                 if registro.data:
                                     supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
@@ -443,4 +484,4 @@ with tab_historial:
         else:
             st.info("Aún no has guardado cálculos para este cliente.")
     else:
-        st.info("No hay clientes registrados en la base de datos.")
+        st.info("Registra un cliente en la pestaña 1 para ver el historial.")
