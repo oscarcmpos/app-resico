@@ -25,7 +25,7 @@ def init_connection():
 supabase = init_connection()
 
 # ==========================================
-# 1. FUNCIONES DE PROCESAMIENTO (CALCULADORA)
+# 1. FUNCIONES DE PROCESAMIENTO (CALCULADORA CON FILTROS RESICO)
 # ==========================================
 def procesar_ingreso_resico(archivo_subido):
     try:
@@ -54,28 +54,70 @@ def procesar_ingreso_resico(archivo_subido):
                 for r in retenciones.findall('cfdi:Retencion', ns):
                     if r.attrib.get('Impuesto') == '001': isr_retenido += float(r.attrib.get('Importe', 0.0))
                     elif r.attrib.get('Impuesto') == '002': iva_retenido += float(r.attrib.get('Importe', 0.0))
-                        
+                    
         return {"Archivo": archivo_subido.name, "Folio": folio, "Subtotal": subtotal, 
                 "IVA Trasladado": iva_trasladado, "ISR Retenido": isr_retenido, "IVA Retenido": iva_retenido}
     except:
         return None
 
-def procesar_gasto(archivo_subido):
+def procesar_gasto_inteligente(archivo_subido):
+    """
+    Filtra y valida los gastos para RESICO. 
+    Descarta regímenes no aplicables (ej. 605 Sueldos y Salarios) y usos de CFDI personales.
+    """
     try:
         archivo_subido.seek(0)
         tree = ET.parse(archivo_subido)
         root = tree.getroot()
         ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
         
+        # Extraer datos del Emisor (Proveedor)
+        emisor = root.find('cfdi:Emisor', ns)
+        rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
+        nombre_emisor = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
+        regimen_emisor = emisor.attrib.get('RegimenFiscal', '') if emisor is not None else ''
+
+        # Extraer datos del Receptor
+        receptor = root.find('cfdi:Receptor', ns)
+        uso_cfdi = receptor.attrib.get('UsoCFDI', '') if receptor is not None else ''
+
         subtotal = float(root.attrib.get('SubTotal', 0.0))
         iva_acreditable = 0.0
+        
         impuestos = root.find('cfdi:Impuestos', ns)
         if impuestos is not None:
             traslados = impuestos.find('cfdi:Traslados', ns)
             if traslados is not None:
                 for t in traslados.findall('cfdi:Traslado', ns):
-                    if t.attrib.get('Impuesto') == '002': iva_acreditable += float(t.attrib.get('Importe', 0.0))
-        return {"Archivo": archivo_subido.name, "Subtotal Gasto": subtotal, "IVA Acreditable": iva_acreditable}
+                    if t.attrib.get('Impuesto') == '002': 
+                        iva_acreditable += float(t.attrib.get('Importe', 0.0))
+
+        # --- LÓGICA DE VALIDACIÓN Y FILTRADO RESICO ---
+        estado = "Acreditable"
+        motivo = "Válido para RESICO"
+
+        # 1. Filtrar Régimen 605 (Sueldos y Salarios) u otros no aplicables
+        if regimen_emisor == '605':
+            estado = "Excluido"
+            motivo = "Régimen 605 (Sueldos y Salarios no acreditable)"
+
+        # 2. Filtrar Usos de CFDI estrictamente personales
+        usos_personales = ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']
+        if uso_cfdi in usos_personales:
+            estado = "Excluido"
+            motivo = f"Uso de CFDI ({uso_cfdi}) es deducción personal"
+
+        return {
+            "Archivo": archivo_subido.name,
+            "Proveedor": nombre_emisor,
+            "RFC Emisor": rfc_emisor,
+            "Régimen": regimen_emisor,
+            "Uso CFDI": uso_cfdi,
+            "Subtotal Gasto": subtotal,
+            "IVA Acreditable": iva_acreditable if estado == "Acreditable" else 0.0,
+            "Estado": estado,
+            "Motivo Rechazo": motivo
+        }
     except:
         return None
 
@@ -87,19 +129,20 @@ def calcular_isr_resico(ingresos_totales):
     else: tasa = 0.025
     return ingresos_totales * tasa, tasa
 
-def generar_excel(df_ingresos, df_gastos, totales):
+def generar_excel(df_ingresos, df_gastos, df_excluidos, totales):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_resumen = pd.DataFrame({
             "Concepto": ["Ingresos Base", "Tasa ISR (%)", "ISR Determinado", "ISR Retenido", "ISR a Pagar", "---",
-                         "IVA Trasladado", "IVA Acreditable", "IVA Retenido", f"IVA a {totales['estatus_iva']}"],
+                         "IVA Trasladado", "IVA Acreditable (Filtrado)", "IVA Retenido", f"IVA a {totales['estatus_iva']}"],
             "Importe": [totales['ingresos'], totales['tasa'] * 100, totales['isr_determinado'], totales['isr_retenido'], 
                         totales['isr_a_pagar'], 0.0, totales['iva_trasladado'], totales['iva_acreditable'], 
                         totales['iva_retenido'], totales['iva_neto']]
         })
         df_resumen.to_excel(writer, sheet_name='Resumen Fiscal', index=False)
         if not df_ingresos.empty: df_ingresos.to_excel(writer, sheet_name='Detalle Ingresos', index=False)
-        if df_gastos is not None and not df_gastos.empty: df_gastos.to_excel(writer, sheet_name='Detalle Gastos', index=False)
+        if df_gastos is not None and not df_gastos.empty: df_gastos.to_excel(writer, sheet_name='Gastos Acreditables', index=False)
+        if df_excluidos is not None and not df_excluidos.empty: df_excluidos.to_excel(writer, sheet_name='Gastos Excluidos (No deducibles)', index=False)
     return buffer.getvalue()
 
 # ==========================================
@@ -213,7 +256,7 @@ col_titulo, col_boton = st.columns([4, 1])
 with col_titulo:
     st.title("🧮 Sistema Contable Automatizado RESICO")
 with col_boton:
-    st.write("") # Espaciado
+    st.write("") 
     if st.button("🔄 Limpiar Todo / Regresar", use_container_width=True):
         st.session_state.reset_key += 1
         st.rerun()
@@ -242,7 +285,7 @@ with tab_calc:
                     else:
                         try:
                             supabase.table("clientes").insert({"nombre": nuevo_cli.strip(), "rfc": nuevo_rfc.strip()}).execute()
-                            st.success("✅ Cliente registrado exitosamente. La página se actualizará...")
+                            st.success("✅ Cliente registrado exitosamente.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"⚠️ Error: Es posible que el RFC '{nuevo_rfc}' ya esté registrado.")
@@ -260,14 +303,14 @@ with tab_calc:
         xml_ingresos = st.file_uploader("Sube facturas emitidas (Se filtrarán las NO-RESICO)", type=['xml'], accept_multiple_files=True, key=f"ing_{st.session_state.reset_key}")
     with col2:
         st.subheader("2. Gastos (XML Recibidos)")
-        xml_gastos = st.file_uploader("Sube facturas de gastos para el IVA", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
+        xml_gastos = st.file_uploader("Sube facturas de gastos (Se filtrarán regímenes 605 y gastos personales)", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
     if xml_ingresos:
         datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
         datos_ingresos = [d for d in datos_ingresos if d is not None] 
         
         if not datos_ingresos:
-            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626) en el nodo Emisor, por lo que fueron descartados para proteger el cálculo.")
+            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626) en el nodo Emisor.")
         else:
             df_ingresos = pd.DataFrame(datos_ingresos)
             total_ingresos = df_ingresos["Subtotal"].sum()
@@ -277,12 +320,17 @@ with tab_calc:
             
             total_iva_acreditable = 0.0
             df_gastos = None
+            df_excluidos = None
             
             if xml_gastos:
-                datos_gastos = [procesar_gasto(x) for x in xml_gastos]
+                datos_gastos = [procesar_gasto_inteligente(x) for x in xml_gastos]
                 datos_gastos = [d for d in datos_gastos if d is not None]
                 if datos_gastos:
-                    df_gastos = pd.DataFrame(datos_gastos)
+                    df_todos_gastos = pd.DataFrame(datos_gastos)
+                    # Separar los gastos válidos de los excluidos automáticamente
+                    df_gastos = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
+                    df_excluidos = df_todos_gastos[df_todos_gastos["Estado"] == "Excluido"]
+                    
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum()
             
             isr_determinado, tasa_aplicada = calcular_isr_resico(total_ingresos)
@@ -294,6 +342,10 @@ with tab_calc:
             st.divider()
             st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
             
+            # Alerta visual si se detectaron y descartaron gastos no procedentes (como el 605)
+            if df_excluidos is not None and not df_excluidos.empty:
+                st.warning(f"🛡️ **Filtro Inteligente RESICO Activo:** Se detectaron y excluyeron **{len(df_excluidos)} factura(s) de gastos** (como régimen 605 o deducciones personales) para proteger tu cálculo de IVA y evitar acreditar montos improcedentes.")
+
             st.subheader("Determinación de ISR")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Ingresos Base", f"${total_ingresos:,.2f}")
@@ -304,11 +356,16 @@ with tab_calc:
             st.subheader("Determinación de IVA")
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("IVA Trasladado (Cobrado)", f"${total_iva_trasladado:,.2f}")
-            c6.metric("IVA Acreditable (Gastos)", f"- ${total_iva_acreditable:,.2f}")
+            c6.metric("IVA Acreditable (Gastos Válidos)", f"- ${total_iva_acreditable:,.2f}")
             c7.metric("IVA Retenido", f"- ${total_iva_retenido:,.2f}")
             
             color_iva = "normal" if iva_neto < 0 else "inverse"
             c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.2f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
+
+            # Mostrar desglose de gastos filtrados en un desplegable
+            if df_excluidos is not None and not df_excluidos.empty:
+                with st.expander("🔍 Ver detalle de gastos excluidos automáticamente"):
+                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Régimen", "Uso CFDI", "Subtotal Gasto", "Motivo Rechazo"]], use_container_width=True)
 
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
@@ -338,7 +395,7 @@ with tab_calc:
                     'iva_acreditable': total_iva_acreditable, 'iva_retenido': total_iva_retenido,
                     'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
                 }
-                archivo_excel = generar_excel(df_ingresos, df_gastos, diccionario_totales)
+                archivo_excel = generar_excel(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
                 st.download_button("📥 Descargar Papeles de Trabajo (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 # --- PESTAÑA 2: VISOR DE XML AVANZADO ---
@@ -506,15 +563,15 @@ with tab_historial:
                                     if registro.data:
                                         supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
                                         st.balloons()
-                                        st.success("¡Mes cerrado y actualizado! Puedes presionar 'Limpiar Todo / Regresar' para empezar de nuevo.")
+                                        st.success("¡Mes cerrado y actualizado!")
                             else:
-                                st.warning("No se pudo extraer automáticamente una cantidad exacta con formato moneda. Aquí tienes el texto para revisión manual:")
+                                st.warning("No se pudo extraer automáticamente una cantidad exacta. Aquí tienes el texto:")
                                 with st.expander("Ver texto del acuse"):
                                     st.text(texto_pdf)
                         except Exception as e:
                             st.error(f"Error al leer el PDF: {e}")
             else:
-                st.info("Aún no has guardado cálculos para este cliente. Ve a la Pestaña 1 y presiona 'Guardar Cálculo en Base de Datos'.")
+                st.info("Aún no has guardado cálculos para este cliente.")
         except Exception as e:
             st.error("Error al cargar el historial.")
     else:
