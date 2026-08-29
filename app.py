@@ -290,7 +290,6 @@ with tab_calc:
                         except Exception as e:
                             st.error(f"⚠️ Error al registrar: {e}")
         
-        # NUEVA SECCIÓN: ELIMINAR CLIENTE DUPLICADO
         if lista_clientes:
             with st.expander("🗑️ Eliminar Cliente (Duplicado o Inactivo)"):
                 with st.form("form_eliminar_cliente"):
@@ -298,9 +297,7 @@ with tab_calc:
                     if st.form_submit_button("🗑️ Borrar Cliente Definitivamente", use_container_width=True):
                         cli_id_borrar = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_a_borrar)
                         try:
-                            # Borrar primero su historial asociado para evitar errores de llave foránea
                             supabase.table("historial_calculos").delete().eq("cliente_id", cli_id_borrar).execute()
-                            # Borrar el cliente
                             supabase.table("clientes").delete().eq("id", cli_id_borrar).execute()
                             st.success(f"🗑️ Cliente '{cliente_a_borrar}' eliminado correctamente.")
                             st.rerun()
@@ -524,7 +521,7 @@ with tab_visor:
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para consultarlos aquí.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES (LECTOR PDF MEJORADO) ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES (LECTOR PDF ROBUSTO) ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
@@ -552,25 +549,24 @@ with tab_historial:
                         with pdfplumber.open(acuse_pdf) as pdf:
                             for p in pdf.pages: texto_pdf += p.extract_text() + "\n"
                         
-                        # MEJORA: Patrón flexible que busca cualquier cantidad con decimales (con o sin $)
-                        cantidades = re.findall(r"(?:\$\s*)?([\d]{1,3}(?:,\d{3})*\.\d{2})", texto_pdf)
+                        # NUEVO PATRÓN: Captura cualquier número con o sin decimales y comas en todo el texto del PDF
+                        cantidades = re.findall(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\b", texto_pdf)
                         
                         if cantidades:
-                            # Limpiar duplicados y mostrar lista de montos detectados para mayor robustez
                             cantidades_unicas = list(dict.fromkeys(cantidades))
-                            st.success(f"¡Se detectaron montos en el acuse del SAT!")
+                            st.success(f"¡Se detectaron cifras numéricas en el acuse del SAT!")
                             
-                            monto_seleccionado = st.selectbox("Selecciona el importe exacto de la declaración para validar:", cantidades_unicas)
+                            monto_seleccionado = st.selectbox("Selecciona el importe clave de la declaración para validar:", cantidades_unicas)
                             
                             if st.button("✅ Confirmar y Marcar como Declarado", use_container_width=True):
                                 registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", int(anio_acuse)).execute()
                                 if registro.data:
                                     supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
                                     st.balloons()
-                                    st.success(f"¡Estatus actualizado! Mes declarado por un monto de ${monto_seleccionado}.")
+                                    st.success(f"¡Estatus actualizado! Mes declarado correctamente.")
                                     st.rerun()
                         else:
-                            st.warning("No se pudo extraer automáticamente ninguna cantidad numérica con decimales. Revisa el texto extraído:")
+                            st.warning("No se pudo extraer texto numérico automáticamente. Revisa el texto extraído:")
                             with st.expander("Ver texto completo del PDF"):
                                 st.text(texto_pdf)
             else:
