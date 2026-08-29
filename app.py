@@ -225,7 +225,8 @@ def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
         root = tree.getroot()
         ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
         
-        fecha = root.attrib.get('Fecha', '')[:10]
+        fecha_completa = root.attrib.get('Fecha', '')
+        fecha = fecha_completa[:10]
         tipo = root.attrib.get('TipoDeComprobante', '')
         metodo = root.attrib.get('MetodoPago', 'N/A')
         
@@ -263,20 +264,25 @@ def extraer_cfdi_completo(archivo_subido):
     ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4', 'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital', 'pago20': 'http://www.sat.gob.mx/Pagos20'}
     
     tipo_comp = root.attrib.get('TipoDeComprobante', '')
+    fecha_hora = root.attrib.get('Fecha', '')
+    
+    fecha = fecha_hora[:10] if len(fecha_hora) >= 10 else ''
+    hora = fecha_hora[11:19] if len(fecha_hora) >= 19 else '00:00:00'
     
     datos = {
-        "fecha": root.attrib.get('Fecha', ''),
-        "folio": root.attrib.get('Folio', 'S/F'),
         "serie": root.attrib.get('Serie', ''),
+        "folio": root.attrib.get('Folio', 'S/F'),
+        "fecha": fecha,
+        "hora": hora,
         "subtotal": float(root.attrib.get('SubTotal', '0.00')),
-        "descuento": float(root.attrib.get('Descuento', '0.00')),
+        "descuento": float(root.attrib.get('Descuento', '0.00')) if root.attrib.get('Descuento') else 0.0,
         "total": float(root.attrib.get('Total', '0.00')),
         "moneda": root.attrib.get('Moneda', 'MXN'),
         "uuid": "No encontrado",
         "conceptos": [],
         "iva_trasladado": 0.0,
-        "isr_retenido": 0.0,
-        "iva_retenido": 0.0
+        "iva_retenido": 0.0,
+        "isr_retenido": 0.0
     }
     
     if tipo_comp == 'P':
@@ -302,6 +308,7 @@ def extraer_cfdi_completo(archivo_subido):
     receptor = root.find('cfdi:Receptor', ns)
     datos["rec_rfc"] = receptor.attrib.get('Rfc', '') if receptor is not None else ''
     datos["rec_nombre"] = receptor.attrib.get('Nombre', '') if receptor is not None else ''
+    datos["rec_regimen"] = receptor.attrib.get('RegimenFiscalReceptor', '') if receptor is not None else ''
     datos["rec_uso"] = receptor.attrib.get('UsoCFDI', '') if receptor is not None else ''
     
     complemento = root.find('cfdi:Complemento', ns)
@@ -420,7 +427,6 @@ with tab_calc:
         st.subheader("2. Gastos y Pagos (XML Recibidos + REPs)", help="Sube tus facturas (PUE/PPD) y sus complementos de pago tipo P")
         xml_gastos = st.file_uploader("Sube facturas y complementos", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
-    # PERMITIR CÁLCULO SI HAY INGRESOS O GASTOS SUBIDOS
     if xml_ingresos or xml_gastos:
         total_ingresos = 0.0
         total_iva_trasladado = 0.0
@@ -577,7 +583,7 @@ with tab_calc:
             archivo_excel = generar_excel_formulado(df_ingresos, df_gastos if not df_gastos.empty else None, df_excluidos if not df_excluidos.empty else None, diccionario_totales)
             st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-# --- PESTAÑA 2: VISOR DE XML ---
+# --- PESTAÑA 2: VISOR DE XML (ESTILO REPRESENTACIÓN IMPRESA) ---
 with tab_visor:
     st.header("📄 Visor Avanzado de CFDI")
     tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
@@ -610,74 +616,105 @@ with tab_visor:
                 nombre_archivo_seleccionado = df_meta[df_meta['display'] == seleccion_display]['nombre_archivo'].iloc[0]
                 archivo_activo = next(f for f in archivos_a_mostrar if f.name == nombre_archivo_seleccionado)
                 
-                datos_visor = extraer_cfdi_completo(archivo_activo)
+                d = extraer_cfdi_completo(archivo_activo)
                 
-                html_cfdi = f"""<div style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #333;">
-                <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2e86c1; padding-bottom: 10px; margin-bottom: 20px;">
-                <div>
-                <h2 style="margin: 0; color: #2e86c1;">Factura Electrónica (CFDI)</h2>
-                <p style="margin: 5px 0 0 0;"><strong>UUID:</strong> {datos_visor['uuid']}</p>
+                # Tarjeta HTML Profesional tipo Representación Impresa
+                html_cfdi = f"""
+                <div style="font-family: Arial, sans-serif; border: 1px solid #bdc3c7; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #2c3e50;">
+                    <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2980b9; padding-bottom: 12px; margin-bottom: 20px;">
+                        <div>
+                            <h2 style="margin: 0; color: #2980b9; font-size: 22px;">Representación Impresa de CFDI</h2>
+                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #7f8c8d;"><strong>UUID:</strong> {d['uuid']}</p>
+                        </div>
+                        <div style="text-align: right;">
+                            <p style="margin: 0; font-size: 14px;"><strong>Serie y Folio:</strong> {d['serie']} {d['folio']}</p>
+                            <p style="margin: 3px 0 0 0; font-size: 13px; color: #7f8c8d;">Fecha y Hora: {d['fecha']} {d['hora']}</p>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+                        <div style="width: 48%; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #2980b9; border-radius: 4px;">
+                            <h4 style="margin: 0 0 8px 0; color: #2980b9; font-size: 15px;">Datos del Emisor</h4>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>Nombre:</strong> {d['emi_nombre']}</p>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>RFC:</strong> {d['emi_rfc']}</p>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>Régimen Fiscal:</strong> {d['emi_regimen']}</p>
+                        </div>
+                        <div style="width: 48%; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #27ae60; border-radius: 4px;">
+                            <h4 style="margin: 0 0 8px 0; color: #27ae60; font-size: 15px;">Datos del Receptor</h4>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>Nombre:</strong> {d['rec_nombre']}</p>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>RFC:</strong> {d['rec_rfc']}</p>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>Régimen Receptor:</strong> {d['rec_regimen']}</p>
+                            <p style="margin: 3px 0; font-size: 13px;"><strong>Uso CFDI:</strong> {d['rec_uso']}</p>
+                        </div>
+                    </div>
+
+                    <h4 style="margin-bottom: 8px; color: #34495e; font-size: 15px; border-bottom: 1px solid #ecf0f1; padding-bottom: 5px;">Conceptos</h4>
+                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px;">
+                        <tr style="background-color: #2980b9; color: white;">
+                            <th style="padding: 8px; text-align: center; border: 1px solid #bdc3c7;">Cant.</th>
+                            <th style="padding: 8px; text-align: left; border: 1px solid #bdc3c7;">Descripción</th>
+                            <th style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">Valor Unitario</th>
+                            <th style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">Importe</th>
+                        </tr>
+                """
+                for c in d['conceptos']:
+                    html_cfdi += f"""
+                        <tr>
+                            <td style="padding: 8px; text-align: center; border: 1px solid #bdc3c7;">{c['cantidad']}</td>
+                            <td style="padding: 8px; text-align: left; border: 1px solid #bdc3c7;">{c['descripcion']}</td>
+                            <td style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">${c['valor_unitario']:,.2f}</td>
+                            <td style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">${c['importe']:,.2f}</td>
+                        </tr>
+                    """
+                
+                html_cfdi += f"""
+                    </table>
+
+                    <div style="display: flex; justify-content: flex-end;">
+                        <div style="width: 320px; padding: 15px; background-color: #f8f9fa; border-radius: 6px; border: 1px solid #bdc3c7; font-size: 13px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <strong>Subtotal:</strong> <span>${d['subtotal']:,.2f}</span>
+                            </div>
+                """
+                if d['descuento'] > 0:
+                    html_cfdi += f"""
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
+                                <strong>Descuento:</strong> <span>-${d['descuento']:,.2f}</span>
+                            </div>
+                    """
+                if d['iva_trasladado'] > 0:
+                    html_cfdi += f"""
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <strong>I.V.A. (Trasladado):</strong> <span>${d['iva_trasladado']:,.2f}</span>
+                            </div>
+                    """
+                if d['retencion_isr'] > 0 if 'retencion_isr' in d else False: # por compatibilidad
+                    pass
+                if d['isr_retenido'] > 0:
+                    html_cfdi += f"""
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
+                                <strong>Retención I.S.R.:</strong> <span>-${d['isr_retenido']:,.2f}</span>
+                            </div>
+                    """
+                if d['iva_retenido'] > 0:
+                    html_cfdi += f"""
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
+                                <strong>Retención I.V.A.:</strong> <span>-${d['iva_retenido']:,.2f}</span>
+                            </div>
+                    """
+                html_cfdi += f"""
+                            <div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 2px solid #bdc3c7; padding-top: 6px; margin-top: 6px; color: #2c3e50;">
+                                <strong>Total:</strong> <strong>${d['total']:,.2f} {d['moneda']}</strong>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div style="text-align: right;">
-                <h3 style="margin: 0; color: #555;">Serie y Folio: {datos_visor['serie']}{datos_visor['folio']}</h3>
-                <p style="margin: 5px 0 0 0;">Fecha: {datos_visor['fecha']}</p>
-                </div>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-                <div style="width: 48%; padding: 15px; background-color: #f9f9f9; border-radius: 5px;">
-                <h4 style="margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Datos del Emisor</h4>
-                <p style="margin: 5px 0;"><strong>Nombre:</strong> {datos_visor['emi_nombre']}</p>
-                <p style="margin: 5px 0;"><strong>RFC:</strong> {datos_visor['emi_rfc']}</p>
-                <p style="margin: 5px 0;"><strong>Régimen:</strong> {datos_visor['emi_regimen']}</p>
-                </div>
-                <div style="width: 48%; padding: 15px; background-color: #f9f9f9; border-radius: 5px;">
-                <h4 style="margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Datos del Receptor</h4>
-                <p style="margin: 5px 0;"><strong>Nombre:</strong> {datos_visor['rec_nombre']}</p>
-                <p style="margin: 5px 0;"><strong>RFC:</strong> {datos_visor['rec_rfc']}</p>
-                <p style="margin: 5px 0;"><strong>Uso CFDI:</strong> {datos_visor['rec_uso']}</p>
-                </div>
-                </div>
-                <h4 style="margin-bottom: 10px; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Conceptos</h4>
-                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-                <tr style="background-color: #2e86c1; color: white;">
-                <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Cant.</th>
-                <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Descripción</th>
-                <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Valor Unitario</th>
-                <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Importe</th>
-                </tr>"""
-                for c in datos_visor['conceptos']:
-                    html_cfdi += f"""<tr>
-                <td style="padding: 8px; text-align: center; border: 1px solid #ddd;">{c['cantidad']}</td>
-                <td style="padding: 8px; text-align: left; border: 1px solid #ddd;">{c['descripcion']}</td>
-                <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['valor_unitario']:,.2f}</td>
-                <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['importe']:,.2f}</td>
-                </tr>"""
-                html_cfdi += f"""</table>
-                <div style="display: flex; justify-content: flex-end;">
-                <div style="width: 320px; padding: 15px; background-color: #f0f8ff; border-radius: 5px; border: 1px solid #b0c4de;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-                <strong>Subtotal:</strong> <span>${datos_visor['subtotal']:,.2f}</span>
-                </div>"""
-                if datos_visor['descuento'] > 0:
-                    html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-                    <strong>Descuento:</strong> <span>-${datos_visor['descuento']:,.2f}</span></div>"""
-                if datos_visor['iva_trasladado'] > 0:
-                    html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-                    <strong>IVA (16%):</strong> <span>${datos_visor['iva_trasladado']:,.2f}</span></div>"""
-                if datos_visor['isr_retenido'] > 0:
-                    html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-                    <strong>Retención ISR:</strong> <span>-${datos_visor['isr_retenido']:,.2f}</span></div>"""
-                if datos_visor['iva_retenido'] > 0:
-                    html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-                    <strong>Retención IVA:</strong> <span>-${datos_visor['iva_retenido']:,.2f}</span></div>"""
-                html_cfdi += f"""<div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 1px solid #ccc; padding-top: 5px; margin-top: 5px;">
-                <strong>Total:</strong> <strong>${datos_visor['total']:,.2f} {datos_visor['moneda']}</strong>
-                </div></div></div></div>"""
+                """
                 st.markdown(html_cfdi, unsafe_allow_html=True)
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para consultarlos aquí.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES (ORDEN CRONOLÓGICO DE MESES) ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
@@ -690,6 +727,11 @@ with tab_historial:
             
             if historial_db.data:
                 df_historial = pd.DataFrame(historial_db.data)
+                
+                # ORDEN CRONOLÓGICO DE MESES
+                df_historial["mes_idx"] = df_historial["mes"].apply(lambda x: MESES_LISTA.index(x) if x in MESES_LISTA else 99)
+                df_historial = df_historial.sort_values(by=["anio", "mes_idx"], ascending=[False, True]).drop(columns=["mes_idx"])
+                
                 st.dataframe(df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]], use_container_width=True)
                 
                 st.divider()
