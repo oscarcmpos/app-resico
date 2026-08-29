@@ -280,16 +280,32 @@ with tab_calc:
                         st.error("⚠️ El Nombre y el RFC son obligatorios.")
                     else:
                         try:
-                            # Validar si ya existe el RFC en Supabase antes de insertar
                             existe = supabase.table("clientes").select("id").eq("rfc", nuevo_rfc.strip()).execute()
                             if existe.data:
-                                st.warning(f"⚠️ El RFC '{nuevo_rfc.strip()}' ya está registrado en la base de datos.")
+                                st.warning(f"⚠️ El RFC '{nuevo_rfc.strip()}' ya está registrado.")
                             else:
                                 supabase.table("clientes").insert({"nombre": nuevo_cli.strip(), "rfc": nuevo_rfc.strip()}).execute()
                                 st.success("✅ Cliente registrado con éxito. Recargando...")
                                 st.rerun()
                         except Exception as e:
                             st.error(f"⚠️ Error al registrar: {e}")
+        
+        # NUEVA SECCIÓN: ELIMINAR CLIENTE DUPLICADO
+        if lista_clientes:
+            with st.expander("🗑️ Eliminar Cliente (Duplicado o Inactivo)"):
+                with st.form("form_eliminar_cliente"):
+                    cliente_a_borrar = st.selectbox("Selecciona cliente a eliminar", nombres_clientes, key="del_cli")
+                    if st.form_submit_button("🗑️ Borrar Cliente Definitivamente", use_container_width=True):
+                        cli_id_borrar = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_a_borrar)
+                        try:
+                            # Borrar primero su historial asociado para evitar errores de llave foránea
+                            supabase.table("historial_calculos").delete().eq("cliente_id", cli_id_borrar).execute()
+                            # Borrar el cliente
+                            supabase.table("clientes").delete().eq("id", cli_id_borrar).execute()
+                            st.success(f"🗑️ Cliente '{cliente_a_borrar}' eliminado correctamente.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al eliminar: {e}")
     
     with col_mes:
         mes_sel = st.selectbox("Mes", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
@@ -333,7 +349,6 @@ with tab_calc:
                     df_excluidos = df_todos_gastos[df_todos_gastos["Estado"] == "Excluido"]
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum()
             
-            # --- REDONDEO FISCAL OFICIAL SAT ---
             ingresos_redondeados = round(total_ingresos)
             isr_determinado, tasa_aplicada = calcular_isr_resico(ingresos_redondeados)
             isr_determinado = round(isr_determinado)
@@ -380,7 +395,6 @@ with tab_calc:
                 if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
                     cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
                     
-                    # Comprobar si ya existe registro para este mes/año y actualizarlo o insertarlo
                     viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
                     if viejo.data:
                         supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
@@ -410,7 +424,7 @@ with tab_calc:
                 archivo_excel = generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
                 st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-# --- PESTAÑA 2: VISOR DE XML (TARJETA VISUAL RESTAURADA) ---
+# --- PESTAÑA 2: VISOR DE XML ---
 with tab_visor:
     st.header("📄 Visor Avanzado de CFDI")
     tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
@@ -445,7 +459,6 @@ with tab_visor:
                 
                 datos_visor = extraer_cfdi_completo(archivo_activo)
                 
-                # Tarjeta HTML Visual de la Factura
                 html_cfdi = f"""<div style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #333;">
                 <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2e86c1; padding-bottom: 10px; margin-bottom: 20px;">
                 <div>
@@ -511,7 +524,7 @@ with tab_visor:
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para consultarlos aquí.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES (CONECTADO A SUPABASE) ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES (LECTOR PDF MEJORADO) ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
@@ -538,18 +551,27 @@ with tab_historial:
                         texto_pdf = ""
                         with pdfplumber.open(acuse_pdf) as pdf:
                             for p in pdf.pages: texto_pdf += p.extract_text() + "\n"
-                        cantidades = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
+                        
+                        # MEJORA: Patrón flexible que busca cualquier cantidad con decimales (con o sin $)
+                        cantidades = re.findall(r"(?:\$\s*)?([\d]{1,3}(?:,\d{3})*\.\d{2})", texto_pdf)
+                        
                         if cantidades:
-                            st.success(f"Monto detectado en acuse: ${cantidades[-1]}")
-                            if st.button("✅ Cuadra perfecto. Marcar como Declarado"):
+                            # Limpiar duplicados y mostrar lista de montos detectados para mayor robustez
+                            cantidades_unicas = list(dict.fromkeys(cantidades))
+                            st.success(f"¡Se detectaron montos en el acuse del SAT!")
+                            
+                            monto_seleccionado = st.selectbox("Selecciona el importe exacto de la declaración para validar:", cantidades_unicas)
+                            
+                            if st.button("✅ Confirmar y Marcar como Declarado", use_container_width=True):
                                 registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", int(anio_acuse)).execute()
                                 if registro.data:
                                     supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
                                     st.balloons()
-                                    st.success("¡Estatus actualizado a Declarado y Cuadrado con éxito!")
+                                    st.success(f"¡Estatus actualizado! Mes declarado por un monto de ${monto_seleccionado}.")
+                                    st.rerun()
                         else:
-                            st.warning("No se pudo extraer automáticamente la cantidad exacta. Revisa el texto extraído:")
-                            with st.expander("Ver texto"):
+                            st.warning("No se pudo extraer automáticamente ninguna cantidad numérica con decimales. Revisa el texto extraído:")
+                            with st.expander("Ver texto completo del PDF"):
                                 st.text(texto_pdf)
             else:
                 st.info("No hay cálculos guardados para este cliente todavía. Realiza un cálculo en la Pestaña 1 y guárdalo.")
