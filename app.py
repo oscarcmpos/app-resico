@@ -36,7 +36,7 @@ def obtener_mes_anterior(mes_actual, anio_actual):
         return None, anio_actual
 
 # ==========================================
-# 1. FUNCIONES DE PROCESAMIENTO (FILTRO ESTRICTO RESICO 626)
+# 1. FUNCIONES DE PROCESAMIENTO (INTELIGENTE CON REPS TIPO P)
 # ==========================================
 def procesar_ingreso_resico(archivo_subido):
     try:
@@ -71,13 +71,58 @@ def procesar_ingreso_resico(archivo_subido):
     except:
         return None
 
-def procesar_gasto_inteligente(archivo_subido):
+def procesar_gasto_o_pago(archivo_subido):
+    """
+    Procesa tanto facturas de gastos (PUE/PPD) como Complementos de Pago (REP tipo P).
+    """
     try:
         archivo_subido.seek(0)
         tree = ET.parse(archivo_subido)
         root = tree.getroot()
-        ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
+        ns = {
+            'cfdi': 'http://www.sat.gob.mx/cfd/4',
+            'pago20': 'http://www.sat.gob.mx/Pagos20'
+        }
         
+        tipo_comprobante = root.attrib.get('TipoDeComprobante', '')
+        
+        # CASO 1: ES UN COMPLEMENTO DE PAGO (REP TIPO P)
+        if tipo_comprobante == 'P':
+            emisor = root.find('cfdi:Emisor', ns)
+            nombre_emisor = emisor.attrib.get('Nombre', 'Proveedor REP') if emisor is not None else 'Proveedor REP'
+            rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
+            
+            # Buscar los UUIDs relacionados y el IVA pagado en el complemento de pagos 2.0
+            iva_pagado_rep = 0.0
+            uuids_relacionados = []
+            
+            pagos = root.findall('.//pago20:Pago', ns)
+            for pago in pagos:
+                doctos = pago.findall('pago20:DoctoRelacionado', ns)
+                for doc in doctos:
+                    uuid_rel = doc.attrib.get('IdDocumento', '')
+                    if uuid_rel:
+                        uuids_relacionados.append(uuid_rel.upper())
+                
+                # Extraer IVA de los traslados del pago
+                traslados_p = pago.findall('.//pago20:TrasladoP', ns)
+                for t_p in traslados_p:
+                    if t_p.attrib.get('ImpuestoP') == '002':
+                        iva_pagado_rep += float(t_p.attrib.get('ImporteP', 0.0))
+
+            return {
+                "TipoRegistro": "REP",
+                "Archivo": archivo_subido.name,
+                "Proveedor": nombre_emisor,
+                "RFC Emisor": rfc_emisor,
+                "UUIDs Relacionados": uuids_relacionados,
+                "IVA Acreditable": iva_pagado_rep,
+                "Subtotal Gasto": 0.0,
+                "Estado": "REP Válido",
+                "Motivo Rechazo": "Complemento de Pago que libera IVA de PPD"
+            }
+
+        # CASO 2: ES UNA FACTURA DE GASTO CONVENCIONAL (I o E)
         emisor = root.find('cfdi:Emisor', ns)
         rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
         nombre_emisor = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
@@ -88,7 +133,10 @@ def procesar_gasto_inteligente(archivo_subido):
         uso_cfdi = receptor.attrib.get('UsoCFDI', '') if receptor is not None else ''
         
         metodo_pago = root.attrib.get('MetodoPago', '')
-        tipo_comprobante = root.attrib.get('TipoDeComprobante', '')
+        
+        # Extraer UUID del timbre fiscal digital
+        tfd = root.find('.//tfd:TimbreFiscalDigital', {'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'})
+        uuid_factura = tfd.attrib.get('UUID', '').upper() if tfd is not None else ''
 
         subtotal = float(root.attrib.get('SubTotal', 0.0))
         iva_acreditable = 0.0
@@ -101,7 +149,6 @@ def procesar_gasto_inteligente(archivo_subido):
                     if t.attrib.get('Impuesto') == '002': 
                         iva_acreditable += float(t.attrib.get('Importe', 0.0))
 
-        # --- FILTROS ESTRICTOS RESICO (EXIGIR RECEPTOR 626) ---
         estado = "Acreditable"
         motivo = "Válido para RESICO"
 
@@ -109,16 +156,15 @@ def procesar_gasto_inteligente(archivo_subido):
             estado = "Excluido"
             motivo = f"Régimen fiscal del receptor ({regimen_receptor}) no es RESICO (626)"
         elif metodo_pago == 'PPD':
-            estado = "Excluido"
-            motivo = "Método PPD (Requiere REP para acreditar IVA)"
-        elif tipo_comprobante in ['P', 'N']:
-            estado = "Excluido"
-            motivo = f"Comprobante tipo {tipo_comprobante} no genera IVA acreditable"
+            estado = "PPD Pendiente"  # Se quedará en pendiente hasta que llegue su REP
+            motivo = "Método PPD (Esperando Complemento de Pago / REP)"
         elif uso_cfdi in ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']:
             estado = "Excluido"
             motivo = f"Uso de CFDI ({uso_cfdi}) es deducción personal"
 
         return {
+            "TipoRegistro": "Factura",
+            "UUID": uuid_factura,
             "Archivo": archivo_subido.name,
             "Proveedor": nombre_emisor,
             "RFC Emisor": rfc_emisor,
@@ -127,7 +173,7 @@ def procesar_gasto_inteligente(archivo_subido):
             "Método Pago": metodo_pago,
             "Uso CFDI": uso_cfdi,
             "Subtotal Gasto": subtotal,
-            "IVA Acreditable": iva_acreditable if estado == "Acreditable" else 0.0,
+            "IVA Acreditable": iva_acreditable,
             "Estado": estado,
             "Motivo Rechazo": motivo
         }
@@ -167,9 +213,6 @@ def generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, totales):
         if df_excluidos is not None and not df_excluidos.empty: df_excluidos.to_excel(writer, sheet_name='Gastos Excluidos', index=False)
     return buffer.getvalue()
 
-# ==========================================
-# 2. FUNCIONES DE EXTRACCIÓN AVANZADA (VISOR HTML)
-# ==========================================
 def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
     try:
         archivo_subido.seek(0)
@@ -355,8 +398,8 @@ with tab_calc:
         st.subheader("1. Ingresos (XML Emitidos)")
         xml_ingresos = st.file_uploader("Sube facturas emitidas", type=['xml'], accept_multiple_files=True, key=f"ing_{st.session_state.reset_key}")
     with col2:
-        st.subheader("2. Gastos (XML Recibidos)")
-        xml_gastos = st.file_uploader("Sube facturas de gastos", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
+        st.subheader("2. Gastos y Pagos (XML Recibidos + REPs)", help="Sube tus facturas (PUE/PPD) y sus complementos de pago tipo P")
+        xml_gastos = st.file_uploader("Sube facturas y complementos", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
     if xml_ingresos:
         datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
@@ -377,35 +420,63 @@ with tab_calc:
             df_excluidos = None
             
             if xml_gastos:
-                datos_gastos = [procesar_gasto_inteligente(x) for x in xml_gastos]
-                datos_gastos = [d for d in datos_gastos if d is not None]
-                if datos_gastos:
-                    df_todos_gastos = pd.DataFrame(datos_gastos)
+                resultados_brutos = [procesar_gasto_o_pago(x) for x in xml_gastos]
+                resultados_brutos = [r for r in resultados_brutos if r is not None]
+                
+                if resultados_brutos:
+                    df_todos = pd.DataFrame(resultados_brutos)
                     
-                    # Separar automáticos válidos
-                    df_auto_acreditable = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
+                    # Separar facturas y REPs
+                    df_facturas = df_todos[df_todos["TipoRegistro"] == "Factura"].copy()
+                    df_reps = df_todos[df_todos["TipoRegistro"] == "REP"].copy()
                     
-                    # --- NUEVA FUNCIÓN: EXCLUSIÓN MANUAL DE FACTURAS ACREDITABLES ---
+                    # --- CONCILIACIÓN PPD vs REP AUTOMÁTICA ---
+                    # Si hay un REP que paga un PPD, pasamos el PPD de "PPD Pendiente" a "Acreditable"
+                    uuid_acreditados_por_rep = []
+                    for _, rep in df_reps.iterrows():
+                        for uuid_rel in rep["UUIDs Relacionados"]:
+                            uuid_acreditados_por_rep.append(uuid_rel)
+                    
+                    # Actualizar estado de las facturas PPD que ya tienen su REP en los XMLs subidos
+                    if uuid_acreditados_por_rep:
+                        mask_ppd_pagado = df_facturas["UUID"].isin(uuid_acreditados_por_rep) & (df_facturas["Estado"] == "PPD Pendiente")
+                        df_facturas.loc[mask_ppd_pagado, "Estado"] = "Acreditable"
+                        df_facturas.loc[mask_ppd_pagado, "Motivo Rechazo"] = "PPD Liberado mediante Complemento de Pago (REP)"
+
+                    # Añadir el IVA de los REPs directos al acumulado acreditable y mandar REPs a excluidos/informativos
+                    iva_extra_reps = df_reps["IVA Acreditable"].sum()
+                    
+                    # Separar acreditables definitivos
+                    df_gastos = df_facturas[df_facturas["Estado"] == "Acreditable"].copy()
+                    
+                    # Todo lo demás va a excluidos/informativos (incluyendo REPs informativos y PPDs sin pagar)
+                    df_excluidos = pd.concat([
+                        df_facturas[df_facturas["Estado"] != "Acreditable"],
+                        df_reps
+                    ], ignore_index=True)
+                    
+                    total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
+                    
+                    # --- EXCLUSIÓN MANUAL ADICIONAL ---
                     excluir_manual = []
-                    if not df_auto_acreditable.empty:
+                    if not df_gastos.empty:
                         with st.expander("⚙️ Exclusión Manual Adicional de Gastos (Opcional)"):
-                            opciones_manuales = df_auto_acreditable["Archivo"].tolist()
+                            opciones_manuales = df_gastos["Archivo"].tolist()
                             excluir_manual = st.multiselect(
                                 "Selecciona facturas que deseas omitir manualmente de la acreditación:",
                                 options=opciones_manuales,
-                                format_func=lambda x: f"{x} - {df_auto_acreditable[df_auto_acreditable['Archivo']==x]['Proveedor'].values[0]} (${df_auto_acreditable[df_auto_acreditable['Archivo']==x]['Subtotal Gasto'].values[0]:,.2f})"
+                                format_func=lambda x: f"{x} - {df_gastos[df_gastos['Archivo']==x]['Proveedor'].values[0]} (${df_gastos[df_gastos['Archivo']==x]['Subtotal Gasto'].values[0]:,.2f})"
                             )
                     
-                    # Aplicar exclusión manual si el usuario seleccionó alguna
                     if excluir_manual:
-                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido"
-                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
-                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "IVA Acreditable"] = 0.0
+                        df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido Manual"
+                        df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
+                        
+                        # Mover de acreditables a excluidos
+                        df_excluidos = pd.concat([df_excluidos, df_gastos[df_gastos["Archivo"].isin(excluir_manual)]], ignore_index=True)
+                        df_gastos = df_gastos[~df_gastos["Archivo"].isin(excluir_manual)]
+                        total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
 
-                    df_gastos = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
-                    df_excluidos = df_todos_gastos[df_todos_gastos["Estado"] == "Excluido"]
-                    total_iva_acreditable = df_gastos["IVA Acreditable"].sum()
-            
             ingresos_redondeados = round(total_ingresos)
             isr_determinado, tasa_aplicada = calcular_isr_resico(ingresos_redondeados)
             isr_determinado = round(isr_determinado)
@@ -427,7 +498,7 @@ with tab_calc:
                 st.info(f"💡 **Acumulado Automático:** Se aplicó un IVA a favor arrastrado del mes anterior por **${iva_favor_anterior:,.0f}**.")
 
             if df_excluidos is not None and not df_excluidos.empty:
-                st.warning(f"🛡️ **Filtro Estricto RESICO (626):** Se excluyeron **{len(df_excluidos)} factura(s)** por régimen incorrecto, PPD sin REP, exclusión manual o uso personal.")
+                st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se procesaron complementos de pago y se filtraron registros no acreditables.")
 
             st.subheader("Determinación de ISR (Redondeado oficial SAT)")
             c1, c2, c3, c4 = st.columns(4)
@@ -439,7 +510,7 @@ with tab_calc:
             st.subheader("Determinación de IVA (Redondeado oficial SAT)")
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("IVA Trasladado", f"${iva_trasladado_redondeado:,.0f}")
-            c6.metric("IVA Acreditable", f"- ${iva_acreditable_redondeado:,.0f}")
+            c6.metric("IVA Acreditable (Incluye PPD liberados por REP)", f"- ${iva_acreditable_redondeado:,.0f}")
             c7.metric("IVA Retenido", f"- ${iva_retenido_redondeado:,.0f}")
             
             color_iva = "normal" if iva_neto < 0 else "inverse"
@@ -448,12 +519,12 @@ with tab_calc:
             with st.expander("🔎 Ver detalle completo con decimales exactos"):
                 st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
                 st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
-                st.write(f"• IVA acreditable exacto: ${total_iva_acreditable:,.2f}")
+                st.write(f"• IVA acreditable exacto (PUE + REP liberados): ${total_iva_acreditable:,.2f}")
                 st.write(f"• IVA a favor aplicado del periodo anterior: ${iva_favor_anterior:,.2f}")
 
             if df_excluidos is not None and not df_excluidos.empty:
-                with st.expander("🔍 Ver detalle de facturas excluidas"):
-                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Regimen Receptor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
+                with st.expander("🔍 Ver detalle de facturas excluidas / REPs informativos"):
+                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
 
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
@@ -462,7 +533,7 @@ with tab_calc:
                 if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
                     cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
                     
-                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
+                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", int(anio_sel)).execute()
                     if viejo.data:
                         supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
                     
