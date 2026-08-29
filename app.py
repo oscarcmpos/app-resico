@@ -23,7 +23,6 @@ def init_connection():
 
 supabase = init_connection()
 
-# Listado de meses para cálculo de periodos anteriores
 MESES_LISTA = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 def obtener_mes_anterior(mes_actual, anio_actual):
@@ -37,7 +36,7 @@ def obtener_mes_anterior(mes_actual, anio_actual):
         return None, anio_actual
 
 # ==========================================
-# 1. FUNCIONES DE PROCESAMIENTO (CÁLCULO Y REDONDEO)
+# 1. FUNCIONES DE PROCESAMIENTO (FILTRO ESTRICTO RESICO 626)
 # ==========================================
 def procesar_ingreso_resico(archivo_subido):
     try:
@@ -85,7 +84,11 @@ def procesar_gasto_inteligente(archivo_subido):
         regimen_emisor = emisor.attrib.get('RegimenFiscal', '') if emisor is not None else ''
 
         receptor = root.find('cfdi:Receptor', ns)
+        regimen_receptor = receptor.attrib.get('RegimenFiscalReceptor', '') if receptor is not None else ''
         uso_cfdi = receptor.attrib.get('UsoCFDI', '') if receptor is not None else ''
+        
+        metodo_pago = root.attrib.get('MetodoPago', '')
+        tipo_comprobante = root.attrib.get('TipoDeComprobante', '')
 
         subtotal = float(root.attrib.get('SubTotal', 0.0))
         iva_acreditable = 0.0
@@ -98,15 +101,27 @@ def procesar_gasto_inteligente(archivo_subido):
                     if t.attrib.get('Impuesto') == '002': 
                         iva_acreditable += float(t.attrib.get('Importe', 0.0))
 
+        # --- FILTROS ESTRICTOS RESICO (EXIGIR RECEPTOR 626) ---
         estado = "Acreditable"
         motivo = "Válido para RESICO"
 
-        if regimen_emisor == '605':
+        # 1. REGLA PRINCIPAL: El régimen del receptor DEBE SER ESTRICTAMENTE 626 (RESICO)
+        if regimen_receptor != '626':
             estado = "Excluido"
-            motivo = "Régimen 605 (Sueldos y Salarios no acreditable)"
+            motivo = f"Régimen fiscal del receptor ({regimen_receptor}) no es RESICO (626)"
 
-        usos_personales = ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']
-        if uso_cfdi in usos_personales:
+        # 2. Bloquear método PPD (Requiere Complemento de Pago / REP)
+        elif metodo_pago == 'PPD':
+            estado = "Excluido"
+            motivo = "Método PPD (Requiere REP para acreditar IVA)"
+
+        # 3. Bloquear tipos de comprobante que no son gastos operativos directos (Pagos o Nómina)
+        elif tipo_comprobante in ['P', 'N']:
+            estado = "Excluido"
+            motivo = f"Comprobante tipo {tipo_comprobante} no genera IVA acreditable"
+
+        # 4. Bloquear Usos de CFDI estrictamente personales
+        elif uso_cfdi in ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']:
             estado = "Excluido"
             motivo = f"Uso de CFDI ({uso_cfdi}) es deducción personal"
 
@@ -115,6 +130,8 @@ def procesar_gasto_inteligente(archivo_subido):
             "Proveedor": nombre_emisor,
             "RFC Emisor": rfc_emisor,
             "Régimen": regimen_emisor,
+            "Regimen Receptor": regimen_receptor,
+            "Método Pago": metodo_pago,
             "Uso CFDI": uso_cfdi,
             "Subtotal Gasto": subtotal,
             "IVA Acreditable": iva_acreditable if estado == "Acreditable" else 0.0,
@@ -325,7 +342,6 @@ with tab_calc:
         
     st.divider()
     
-    # Búsqueda automática de saldos a favor del mes anterior en Supabase
     iva_favor_anterior = 0.0
     if cliente_sel and lista_clientes:
         cli_obj = next((c for c in lista_clientes if c['nombre'] == cliente_sel), None)
@@ -386,7 +402,6 @@ with tab_calc:
             iva_acreditable_redondeado = round(total_iva_acreditable)
             iva_retenido_redondeado = round(total_iva_retenido)
             
-            # Cálculo de IVA Neto considerando el remanente arrastrado del mes anterior
             iva_neto_bruto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
             iva_neto = iva_neto_bruto - round(iva_favor_anterior)
             estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
@@ -398,7 +413,7 @@ with tab_calc:
                 st.info(f"💡 **Acumulado Automático:** Se aplicó un IVA a favor arrastrado del mes anterior por **${iva_favor_anterior:,.0f}**.")
 
             if df_excluidos is not None and not df_excluidos.empty:
-                st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se excluyeron **{len(df_excluidos)} factura(s)** (Régimen 605 o personales).")
+                st.warning(f"🛡️ **Filtro Estricto RESICO (626):** Se excluyeron **{len(df_excluidos)} factura(s)** que no tienen régimen 626 en el receptor, PPD sin REP o son personales.")
 
             st.subheader("Determinación de ISR (Redondeado oficial SAT)")
             c1, c2, c3, c4 = st.columns(4)
@@ -421,6 +436,10 @@ with tab_calc:
                 st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
                 st.write(f"• IVA acreditable exacto: ${total_iva_acreditable:,.2f}")
                 st.write(f"• IVA a favor aplicado del periodo anterior: ${iva_favor_anterior:,.2f}")
+
+            if df_excluidos is not None and not df_excluidos.empty:
+                with st.expander("🔍 Ver detalle de facturas excluidas por el filtro estricto RESICO"):
+                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Regimen Receptor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
 
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
