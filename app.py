@@ -25,7 +25,7 @@ def init_connection():
 supabase = init_connection()
 
 # ==========================================
-# 1. FUNCIONES DE PROCESAMIENTO (CALCULADORA CON FILTROS RESICO)
+# 1. FUNCIONES DE PROCESAMIENTO (CÁLCULO Y REDONDEO)
 # ==========================================
 def procesar_ingreso_resico(archivo_subido):
     try:
@@ -61,23 +61,17 @@ def procesar_ingreso_resico(archivo_subido):
         return None
 
 def procesar_gasto_inteligente(archivo_subido):
-    """
-    Filtra y valida los gastos para RESICO. 
-    Descarta regímenes no aplicables (ej. 605 Sueldos y Salarios) y usos de CFDI personales.
-    """
     try:
         archivo_subido.seek(0)
         tree = ET.parse(archivo_subido)
         root = tree.getroot()
         ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
         
-        # Extraer datos del Emisor (Proveedor)
         emisor = root.find('cfdi:Emisor', ns)
         rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
         nombre_emisor = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
         regimen_emisor = emisor.attrib.get('RegimenFiscal', '') if emisor is not None else ''
 
-        # Extraer datos del Receptor
         receptor = root.find('cfdi:Receptor', ns)
         uso_cfdi = receptor.attrib.get('UsoCFDI', '') if receptor is not None else ''
 
@@ -92,16 +86,13 @@ def procesar_gasto_inteligente(archivo_subido):
                     if t.attrib.get('Impuesto') == '002': 
                         iva_acreditable += float(t.attrib.get('Importe', 0.0))
 
-        # --- LÓGICA DE VALIDACIÓN Y FILTRADO RESICO ---
         estado = "Acreditable"
         motivo = "Válido para RESICO"
 
-        # 1. Filtrar Régimen 605 (Sueldos y Salarios) u otros no aplicables
         if regimen_emisor == '605':
             estado = "Excluido"
             motivo = "Régimen 605 (Sueldos y Salarios no acreditable)"
 
-        # 2. Filtrar Usos de CFDI estrictamente personales
         usos_personales = ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']
         if uso_cfdi in usos_personales:
             estado = "Excluido"
@@ -129,24 +120,33 @@ def calcular_isr_resico(ingresos_totales):
     else: tasa = 0.025
     return ingresos_totales * tasa, tasa
 
-def generar_excel(df_ingresos, df_gastos, df_excluidos, totales):
+def generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, totales):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_resumen = pd.DataFrame({
-            "Concepto": ["Ingresos Base", "Tasa ISR (%)", "ISR Determinado", "ISR Retenido", "ISR a Pagar", "---",
-                         "IVA Trasladado", "IVA Acreditable (Filtrado)", "IVA Retenido", f"IVA a {totales['estatus_iva']}"],
-            "Importe": [totales['ingresos'], totales['tasa'] * 100, totales['isr_determinado'], totales['isr_retenido'], 
-                        totales['isr_a_pagar'], 0.0, totales['iva_trasladado'], totales['iva_acreditable'], 
-                        totales['iva_retenido'], totales['iva_neto']]
-        })
+        # Pestaña de Resumen con Fórmulas nativas de Excel
+        wb_resumen_data = [
+            ["Concepto", "Importe"],
+            ["Ingresos Base", totales['ingresos']],
+            ["Tasa ISR (%)", totales['tasa'] * 100],
+            ["ISR Determinado", "=B2*B3"],
+            ["ISR Retenido", totales['isr_retenido']],
+            ["ISR a Pagar", "=MAX(0, B4-B5)"],
+            ["---", 0],
+            ["IVA Trasladado", totales['iva_trasladado']],
+            ["IVA Acreditable (Filtrado)", totales['iva_acreditable']],
+            ["IVA Retenido", totales['iva_retenido']],
+            [f"IVA a {totales['estatus_iva']}", "=B8-B9-B10"]
+        ]
+        df_resumen = pd.DataFrame(wb_resumen_data[1:], columns=wb_resumen_data[0])
         df_resumen.to_excel(writer, sheet_name='Resumen Fiscal', index=False)
+        
         if not df_ingresos.empty: df_ingresos.to_excel(writer, sheet_name='Detalle Ingresos', index=False)
         if df_gastos is not None and not df_gastos.empty: df_gastos.to_excel(writer, sheet_name='Gastos Acreditables', index=False)
-        if df_excluidos is not None and not df_excluidos.empty: df_excluidos.to_excel(writer, sheet_name='Gastos Excluidos (No deducibles)', index=False)
+        if df_excluidos is not None and not df_excluidos.empty: df_excluidos.to_excel(writer, sheet_name='Gastos Excluidos', index=False)
     return buffer.getvalue()
 
 # ==========================================
-# 2. FUNCIONES DE EXTRACCIÓN AVANZADA (VISOR DE XML)
+# 2. FUNCIONES DE EXTRACCIÓN AVANZADA (VISOR)
 # ==========================================
 def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
     try:
@@ -214,8 +214,7 @@ def extraer_cfdi_completo(archivo_subido):
     complemento = root.find('cfdi:Complemento', ns)
     if complemento is not None:
         tfd = complemento.find('tfd:TimbreFiscalDigital', ns)
-        if tfd is not None:
-            datos["uuid"] = tfd.attrib.get('UUID', '')
+        if tfd is not None: datos["uuid"] = tfd.attrib.get('UUID', '')
             
     conceptos = root.find('cfdi:Conceptos', ns)
     if conceptos is not None:
@@ -251,7 +250,6 @@ if supabase is None:
     st.error("⚠️ No se pudo conectar a la base de datos.")
     st.stop()
 
-# Header con botón de reinicio
 col_titulo, col_boton = st.columns([4, 1])
 with col_titulo:
     st.title("🧮 Sistema Contable Automatizado RESICO")
@@ -275,7 +273,7 @@ with tab_calc:
         
         cliente_sel = st.selectbox("Cliente Actual", nombres_clientes) if nombres_clientes else None
             
-        with st.expander("➕ Agregar Nuevo Cliente" if nombres_clientes else "⚠️ Primero agrega un Cliente"):
+        with st.expander("➕ Agregar Nuevo Cliente"):
             with st.form("form_cliente", clear_on_submit=True):
                 nuevo_cli = st.text_input("Nombre / Razón Social")
                 nuevo_rfc = st.text_input("RFC (Debe ser único)")
@@ -288,7 +286,7 @@ with tab_calc:
                             st.success("✅ Cliente registrado exitosamente.")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"⚠️ Error: Es posible que el RFC '{nuevo_rfc}' ya esté registrado.")
+                            st.error(f"⚠️ Error al registrar (Es posible que el RFC ya exista).")
     
     with col_mes:
         mes_sel = st.selectbox("Mes", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
@@ -300,19 +298,21 @@ with tab_calc:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. Ingresos (XML Emitidos)")
-        xml_ingresos = st.file_uploader("Sube facturas emitidas (Se filtrarán las NO-RESICO)", type=['xml'], accept_multiple_files=True, key=f"ing_{st.session_state.reset_key}")
+        xml_ingresos = st.file_uploader("Sube facturas emitidas", type=['xml'], accept_multiple_files=True, key=f"ing_{st.session_state.reset_key}")
     with col2:
         st.subheader("2. Gastos (XML Recibidos)")
-        xml_gastos = st.file_uploader("Sube facturas de gastos (Se filtrarán regímenes 605 y gastos personales)", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
+        xml_gastos = st.file_uploader("Sube facturas de gastos", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
     if xml_ingresos:
         datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
         datos_ingresos = [d for d in datos_ingresos if d is not None] 
         
         if not datos_ingresos:
-            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626) en el nodo Emisor.")
+            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626).")
         else:
             df_ingresos = pd.DataFrame(datos_ingresos)
+            
+            # Totales con decimales para el detalle
             total_ingresos = df_ingresos["Subtotal"].sum()
             total_iva_trasladado = df_ingresos["IVA Trasladado"].sum()
             total_isr_retenido = df_ingresos["ISR Retenido"].sum()
@@ -327,45 +327,49 @@ with tab_calc:
                 datos_gastos = [d for d in datos_gastos if d is not None]
                 if datos_gastos:
                     df_todos_gastos = pd.DataFrame(datos_gastos)
-                    # Separar los gastos válidos de los excluidos automáticamente
                     df_gastos = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
                     df_excluidos = df_todos_gastos[df_todos_gastos["Estado"] == "Excluido"]
-                    
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum()
             
-            isr_determinado, tasa_aplicada = calcular_isr_resico(total_ingresos)
-            isr_a_pagar = isr_determinado - total_isr_retenido
-            if isr_a_pagar < 0: isr_a_pagar = 0.0
-            iva_neto = total_iva_trasladado - total_iva_acreditable - total_iva_retenido
+            # --- REDONDEO FISCAL PARA EL SAT (Cifras enteras) ---
+            ingresos_redondeados = round(total_ingresos)
+            isr_determinado, tasa_aplicada = calcular_isr_resico(ingresos_redondeados)
+            isr_determinado = round(isr_determinado)
+            isr_retenido_redondeado = round(total_isr_retenido)
+            isr_a_pagar = max(0, isr_determinado - isr_retenido_redondeado)
+            
+            iva_trasladado_redondeado = round(total_iva_trasladado)
+            iva_acreditable_redondeado = round(total_iva_acreditable)
+            iva_retenido_redondeado = round(total_iva_retenido)
+            iva_neto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
             estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
             
             st.divider()
             st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
             
-            # Alerta visual si se detectaron y descartaron gastos no procedentes (como el 605)
             if df_excluidos is not None and not df_excluidos.empty:
-                st.warning(f"🛡️ **Filtro Inteligente RESICO Activo:** Se detectaron y excluyeron **{len(df_excluidos)} factura(s) de gastos** (como régimen 605 o deducciones personales) para proteger tu cálculo de IVA y evitar acreditar montos improcedentes.")
+                st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se excluyeron **{len(df_excluidos)} factura(s)** (Régimen 605 o personales).")
 
-            st.subheader("Determinación de ISR")
+            st.subheader("Determinación de ISR (Redondeado oficial SAT)")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Ingresos Base", f"${total_ingresos:,.2f}")
-            c2.metric(f"ISR Determinado ({(tasa_aplicada*100):.2f}%)", f"${isr_determinado:,.2f}")
-            c3.metric("ISR Retenido", f"- ${total_isr_retenido:,.2f}")
-            c4.metric("ISR a Pagar", f"${isr_a_pagar:,.2f}", delta="Pago requerido", delta_color="inverse")
+            c1.metric("Ingresos Base", f"${ingresos_redondeados:,.0f}")
+            c2.metric(f"ISR Determinado ({(tasa_aplicada*100):.2f}%)", f"${isr_determinado:,.0f}")
+            c3.metric("ISR Retenido", f"- ${isr_retenido_redondeado:,.0f}")
+            c4.metric("ISR a Pagar", f"${isr_a_pagar:,.0f}", delta="Pago requerido", delta_color="inverse")
             
-            st.subheader("Determinación de IVA")
+            st.subheader("Determinación de IVA (Redondeado oficial SAT)")
             c5, c6, c7, c8 = st.columns(4)
-            c5.metric("IVA Trasladado (Cobrado)", f"${total_iva_trasladado:,.2f}")
-            c6.metric("IVA Acreditable (Gastos Válidos)", f"- ${total_iva_acreditable:,.2f}")
-            c7.metric("IVA Retenido", f"- ${total_iva_retenido:,.2f}")
+            c5.metric("IVA Trasladado", f"${iva_trasladado_redondeado:,.0f}")
+            c6.metric("IVA Acreditable", f"- ${iva_acreditable_redondeado:,.0f}")
+            c7.metric("IVA Retenido", f"- ${iva_retenido_redondeado:,.0f}")
             
             color_iva = "normal" if iva_neto < 0 else "inverse"
-            c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.2f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
+            c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.0f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
 
-            # Mostrar desglose de gastos filtrados en un desplegable
-            if df_excluidos is not None and not df_excluidos.empty:
-                with st.expander("🔍 Ver detalle de gastos excluidos automáticamente"):
-                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Régimen", "Uso CFDI", "Subtotal Gasto", "Motivo Rechazo"]], use_container_width=True)
+            with st.expander("🔎 Ver detalle completo con decimales exactos"):
+                st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
+                st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
+                st.write(f"• IVA acreditable exacto: ${total_iva_acreditable:,.2f}")
 
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
@@ -379,200 +383,83 @@ with tab_calc:
                     
                     datos_insertar = {
                         "cliente_id": cliente_id, "mes": mes_sel, "anio": anio_sel,
-                        "ingresos_base": float(total_ingresos), "isr_determinado": float(isr_a_pagar),
-                        "iva_cargo_favor": float(iva_neto), "estatus": "Calculando"
+                        "ingresos_base": float(ingresos_redondeados), "isr_determinado": float(isr_a_pagar),
+                        "iva_cargo_favor": float(iva_neto), "estatus": "Guardado / Pendiente de Acuse"
                     }
                     try:
                         supabase.table("historial_calculos").insert(datos_insertar).execute()
-                        st.success(f"Cálculo guardado exitosamente. Ya puedes ir a 'Historial y Acuses' a subir el PDF.")
+                        st.success("✅ Cálculo guardado con éxito. Ya puedes consultarlo en la pestaña 'Historial y Acuses'.")
                     except Exception as e:
-                        st.error("Error al guardar el cálculo en la base de datos.")
+                        st.error(f"Error al guardar: {e}")
 
             with col_btn2:
                 diccionario_totales = {
-                    'ingresos': total_ingresos, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
-                    'isr_retenido': total_isr_retenido, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': total_iva_trasladado,
-                    'iva_acreditable': total_iva_acreditable, 'iva_retenido': total_iva_retenido,
+                    'ingresos': ingresos_redondeados, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
+                    'isr_retenido': isr_retenido_redondeado, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': iva_trasladado_redondeado,
+                    'iva_acreditable': iva_acreditable_redondeado, 'iva_retenido': iva_retenido_redondeado,
                     'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
                 }
-                archivo_excel = generar_excel(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
-                st.download_button("📥 Descargar Papeles de Trabajo (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                archivo_excel = generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
+                st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-# --- PESTAÑA 2: VISOR DE XML AVANZADO ---
+# --- PESTAÑA 2: VISOR DE XML ---
 with tab_visor:
     st.header("🔍 Visor de XML con Filtros Inteligentes")
-    
     tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
+    archivos_to_show = xml_ingresos if tipo_visor == "Emitidas (Ingresos)" else xml_gastos
     
-    archivos_a_mostrar = []
-    tipo_str = ""
-    label_busqueda = ""
-    
-    if tipo_visor == "Emitidas (Ingresos)":
-        if 'xml_ingresos' in locals() and xml_ingresos: archivos_a_mostrar = xml_ingresos
-        tipo_str = 'ingreso'
-        label_busqueda = "👤 Buscar Cliente (Autocompletado):"
-    else:
-        if 'xml_gastos' in locals() and xml_gastos: archivos_a_mostrar = xml_gastos
-        tipo_str = 'gasto'
-        label_busqueda = "🏢 Buscar Proveedor (Autocompletado):"
-    
-    if archivos_a_mostrar:
-        metadatos = [obtener_metadatos_basicos(f, tipo_str) for f in archivos_a_mostrar]
-        metadatos = [m for m in metadatos if m is not None]
-        df_meta = pd.DataFrame(metadatos)
-        
-        nombres_unicos = sorted(df_meta['entidad'].unique().tolist())
-        
-        with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
-            f_col1, f_col2, f_col3 = st.columns(3)
-            filtro_entidad = f_col1.selectbox(label_busqueda, ["Todos"] + nombres_unicos)
-            filtro_metodo = f_col2.selectbox("🏷️ Método de Pago:", ["Todos", "PUE", "PPD", "Pago (Complemento)"])
-            filtro_monto = f_col3.number_input("💵 Buscar Monto Exacto (0 = omitir):", min_value=0.0, step=100.0)
-            
-            if filtro_entidad != "Todos":
-                df_meta = df_meta[df_meta['entidad'] == filtro_entidad]
-            if filtro_metodo != "Todos":
-                df_meta = df_meta[df_meta['metodo'] == filtro_metodo]
-            if filtro_monto > 0:
-                df_meta = df_meta[df_meta['total'] == filtro_monto]
-                
-        st.divider()
-        
+    if archivos_to_show:
+        metadatos = [obtener_metadatos_basicos(f, 'ingreso' if tipo_visor.startswith("Emitidas") else 'gasto') for f in archivos_to_show]
+        df_meta = pd.DataFrame([m for m in metadatos if m])
         if not df_meta.empty:
-            df_meta = df_meta.sort_values(by='fecha', ascending=False)
-            opciones_mostrar = df_meta['display'].tolist()
-            seleccion_display = st.selectbox("📄 Selecciona un CFDI para ver el desglose:", opciones_mostrar)
-            
-            nombre_archivo_seleccionado = df_meta[df_meta['display'] == seleccion_display]['nombre_archivo'].iloc[0]
-            archivo_activo = next(f for f in archivos_a_mostrar if f.name == nombre_archivo_seleccionado)
-            
-            datos_visor = extraer_cfdi_completo(archivo_activo)
-            
-            html_cfdi = f"""<div style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #333;">
-<div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2e86c1; padding-bottom: 10px; margin-bottom: 20px;">
-<div>
-<h2 style="margin: 0; color: #2e86c1;">Factura Electrónica (CFDI)</h2>
-<p style="margin: 5px 0 0 0;"><strong>UUID:</strong> {datos_visor['uuid']}</p>
-</div>
-<div style="text-align: right;">
-<h3 style="margin: 0; color: #555;">Serie y Folio: {datos_visor['serie']}{datos_visor['folio']}</h3>
-<p style="margin: 5px 0 0 0;">Fecha: {datos_visor['fecha']}</p>
-</div>
-</div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-<div style="width: 48%; padding: 15px; background-color: #f9f9f9; border-radius: 5px;">
-<h4 style="margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Datos del Emisor</h4>
-<p style="margin: 5px 0;"><strong>Nombre:</strong> {datos_visor['emi_nombre']}</p>
-<p style="margin: 5px 0;"><strong>RFC:</strong> {datos_visor['emi_rfc']}</p>
-<p style="margin: 5px 0;"><strong>Régimen:</strong> {datos_visor['emi_regimen']}</p>
-</div>
-<div style="width: 48%; padding: 15px; background-color: #f9f9f9; border-radius: 5px;">
-<h4 style="margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Datos del Receptor</h4>
-<p style="margin: 5px 0;"><strong>Nombre:</strong> {datos_visor['rec_nombre']}</p>
-<p style="margin: 5px 0;"><strong>RFC:</strong> {datos_visor['rec_rfc']}</p>
-<p style="margin: 5px 0;"><strong>Uso CFDI:</strong> {datos_visor['rec_uso']}</p>
-</div>
-</div>
-<h4 style="margin-bottom: 10px; border-bottom: 1px solid #ccc; padding-bottom: 5px;">Conceptos</h4>
-<table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-<tr style="background-color: #2e86c1; color: white;">
-<th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Cant.</th>
-<th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Descripción</th>
-<th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Valor Unitario</th>
-<th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Importe</th>
-</tr>"""
-            for c in datos_visor['conceptos']:
-                html_cfdi += f"""<tr>
-<td style="padding: 8px; text-align: center; border: 1px solid #ddd;">{c['cantidad']}</td>
-<td style="padding: 8px; text-align: left; border: 1px solid #ddd;">{c['descripcion']}</td>
-<td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['valor_unitario']:,.2f}</td>
-<td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${c['importe']:,.2f}</td>
-</tr>"""
-            html_cfdi += f"""</table>
-<div style="display: flex; justify-content: flex-end;">
-<div style="width: 320px; padding: 15px; background-color: #f0f8ff; border-radius: 5px; border: 1px solid #b0c4de;">
-<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-<strong>Subtotal:</strong> <span>${datos_visor['subtotal']:,.2f}</span>
-</div>"""
-            if datos_visor['descuento'] > 0:
-                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Descuento:</strong> <span>-${datos_visor['descuento']:,.2f}</span></div>"""
-            if datos_visor['iva_trasladado'] > 0:
-                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-<strong>IVA (16%):</strong> <span>${datos_visor['iva_trasladado']:,.2f}</span></div>"""
-            if datos_visor['isr_retenido'] > 0:
-                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Retención ISR:</strong> <span>-${datos_visor['isr_retenido']:,.2f}</span></div>"""
-            if datos_visor['iva_retenido'] > 0:
-                html_cfdi += f"""<div style="display: flex; justify-content: space-between; margin-bottom: 5px; color: #d9534f;">
-<strong>Retención IVA:</strong> <span>-${datos_visor['iva_retenido']:,.2f}</span></div>"""
-            html_cfdi += f"""<div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 1px solid #ccc; padding-top: 5px; margin-top: 5px;">
-<strong>Total:</strong> <strong>${datos_visor['total']:,.2f} {datos_visor['moneda']}</strong>
-</div></div></div></div>"""
-            st.markdown(html_cfdi, unsafe_allow_html=True)
-        else:
-            st.warning("No se encontraron CFDI que coincidan con los filtros de búsqueda.")
+            seleccion = st.selectbox("Selecciona CFDI:", df_meta['display'].tolist())
+            archivo_activo = next(f for f in archivos_to_show if f.name == df_meta[df_meta['display'] == seleccion]['nombre_archivo'].iloc[0])
+            st.json(extraer_cfdi_completo(archivo_activo))
     else:
-        st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para poder visualizarlos aquí.")
+        st.info("Sube XMLs en la pestaña 1.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES (CORREGIDA) ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
-    if 'lista_clientes' in locals() and lista_clientes:
-        cliente_hist = st.selectbox("Selecciona Cliente", nombres_clientes, key="cli_hist")
+    if lista_clientes:
+        cliente_hist = st.selectbox("Selecciona Cliente para ver su Historial", nombres_clientes, key="cli_hist")
         cliente_id_hist = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_hist)
         
         try:
-            historial_db = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id_hist).order("anio", desc=True).order("mes", desc=True).execute()
+            historial_db = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id_hist).execute()
             
             if historial_db.data:
                 df_historial = pd.DataFrame(historial_db.data)
-                df_historial = df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]]
-                
-                for col in ["ingresos_base", "isr_determinado", "iva_cargo_favor"]:
-                    df_historial[col] = df_historial[col].apply(lambda x: f"${x:,.2f}")
-                    
-                st.dataframe(df_historial, use_container_width=True)
+                st.dataframe(df_historial[["mes", "anio", "estatus", "ingresos_base", "isr_determinado", "iva_cargo_favor"]], use_container_width=True)
                 
                 st.divider()
                 st.subheader("Subir Acuse de Declaración (PDF)")
-                st.write("Selecciona el mes que acabas de guardar para adjuntarle su acuse de recibo del SAT.")
-                mes_acuse = st.selectbox("Mes a verificar", df_historial["mes"].unique())
-                anio_acuse = st.selectbox("Año a verificar", df_historial["anio"].unique())
+                mes_acuse = st.selectbox("Mes a verificar", df_historial["mes"].unique(), key="mes_ac")
+                anio_acuse = st.selectbox("Año a verificar", df_historial["anio"].unique(), key="anio_ac")
                 
-                acuse_pdf = st.file_uploader(f"Sube el acuse del SAT para {mes_acuse} {anio_acuse}", type=['pdf'], key=f"pdf_{st.session_state.reset_key}")
+                acuse_pdf = st.file_uploader("Sube el acuse del SAT en PDF", type=['pdf'], key=f"pdf_{st.session_state.reset_key}")
                 
                 if acuse_pdf:
-                    with st.spinner("Leyendo documento del SAT..."):
-                        try:
-                            texto_pdf = ""
-                            with pdfplumber.open(acuse_pdf) as pdf:
-                                for pagina in pdf.pages:
-                                    texto_pdf += pagina.extract_text() + "\n"
-                            
-                            cantidades_encontradas = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
-                            
-                            if cantidades_encontradas:
-                                st.success(f"Se extrajeron montos del PDF. Último monto detectado: ${cantidades_encontradas[-1]}")
-                                st.write("Verifica que cuadre con tu cálculo inicial.")
-                                
-                                if st.button("✅ Cuadra perfecto. Marcar como Declarado", use_container_width=True):
-                                    registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", anio_acuse).execute()
-                                    if registro.data:
-                                        supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
-                                        st.balloons()
-                                        st.success("¡Mes cerrado y actualizado!")
-                            else:
-                                st.warning("No se pudo extraer automáticamente una cantidad exacta. Aquí tienes el texto:")
-                                with st.expander("Ver texto del acuse"):
-                                    st.text(texto_pdf)
-                        except Exception as e:
-                            st.error(f"Error al leer el PDF: {e}")
+                    with st.spinner("Leyendo acuse..."):
+                        texto_pdf = ""
+                        with pdfplumber.open(acuse_pdf) as pdf:
+                            for p in pdf.pages: texto_pdf += p.extract_text() + "\n"
+                        cantidades = re.findall(r"\$\s*([\d,]+\.\d{2})", texto_pdf)
+                        if cantidades:
+                            st.success(f"Monto detectado en acuse: ${cantidades[-1]}")
+                            if st.button("✅ Cuadra perfecto. Marcar como Declarado"):
+                                registro = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id_hist).eq("mes", mes_acuse).eq("anio", anio_acuse).execute()
+                                if registro.data:
+                                    supabase.table("historial_calculos").update({"estatus": "Declarado y Cuadrado"}).eq("id", registro.data[0]["id"]).execute()
+                                    st.balloons()
+                                    st.success("¡Estatus actualizado a Declarado!")
+                        else:
+                            st.warning("No se pudo extraer el monto exacto, revisa el texto:")
+                            st.text(texto_pdf)
             else:
-                st.info("Aún no has guardado cálculos para este cliente.")
+                st.info("No hay cálculos guardados para este cliente todavía. Realiza un cálculo en la Pestaña 1 y guárdalo.")
         except Exception as e:
-            st.error("Error al cargar el historial.")
+            st.error(f"Error al conectar con la base de datos de historial: {e}")
     else:
-        st.info("Registra un cliente en la pestaña 1 para ver el historial.")
+        st.info("Registra un cliente primero.")
