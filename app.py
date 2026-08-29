@@ -5,6 +5,7 @@ import io
 import pdfplumber
 import re
 from supabase import create_client, Client
+import streamlit.components.v1 as components
 
 if "reset_key" not in st.session_state:
     st.session_state.reset_key = 0
@@ -583,7 +584,7 @@ with tab_calc:
             archivo_excel = generar_excel_formulado(df_ingresos, df_gastos if not df_gastos.empty else None, df_excluidos if not df_excluidos.empty else None, diccionario_totales)
             st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
-# --- PESTAÑA 2: VISOR DE XML (ESTILO REPRESENTACIÓN IMPRESA) ---
+# --- PESTAÑA 2: VISOR DE XML (RENDERIZADO SEGURO CON IFRAME) ---
 with tab_visor:
     st.header("📄 Visor Avanzado de CFDI")
     tipo_visor = st.radio("¿Qué facturas deseas consultar?", ["Emitidas (Ingresos)", "Recibidas (Gastos)"], horizontal=True)
@@ -618,103 +619,106 @@ with tab_visor:
                 
                 d = extraer_cfdi_completo(archivo_activo)
                 
-                # Tarjeta HTML Profesional tipo Representación Impresa
                 html_cfdi = f"""
-                <div style="font-family: Arial, sans-serif; border: 1px solid #bdc3c7; border-radius: 8px; padding: 25px; background-color: #ffffff; color: #2c3e50;">
-                    <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #2980b9; padding-bottom: 12px; margin-bottom: 20px;">
+                <html>
+                <head>
+                <style>
+                    body {{ font-family: Arial, sans-serif; background-color: #ffffff; color: #2c3e50; margin: 0; padding: 15px; }}
+                    .container {{ border: 1px solid #bdc3c7; border-radius: 8px; padding: 25px; background-color: #ffffff; }}
+                    .header {{ display: flex; justify-content: space-between; border-bottom: 2px solid #2980b9; padding-bottom: 12px; margin-bottom: 20px; }}
+                    .box-container {{ display: flex; justify-content: space-between; margin-bottom: 20px; }}
+                    .box {{ width: 48%; padding: 15px; background-color: #f8f9fa; border-radius: 4px; box-sizing: border-box; }}
+                    .box-emisor {{ border-left: 4px solid #2980b9; }}
+                    .box-receptor {{ border-left: 4px solid #27ae60; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }}
+                    th {{ background-color: #2980b9; color: white; padding: 8px; text-align: left; border: 1px solid #bdc3c7; }}
+                    td {{ padding: 8px; border: 1px solid #bdc3c7; }}
+                    .totals {{ display: flex; justify-content: flex-end; }}
+                    .totals-box {{ width: 320px; padding: 15px; background-color: #f8f9fa; border-radius: 6px; border: 1px solid #bdc3c7; font-size: 13px; }}
+                    .row {{ display: flex; justify-content: space-between; margin-bottom: 4px; }}
+                    .total-final {{ font-size: 1.2em; border-top: 2px solid #bdc3c7; padding-top: 6px; margin-top: 6px; font-weight: bold; }}
+                </style>
+                </head>
+                <body>
+                <div class="container">
+                    <div class="header">
                         <div>
-                            <h2 style="margin: 0; color: #2980b9; font-size: 22px;">Representación Impresa de CFDI</h2>
-                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #7f8c8d;"><strong>UUID:</strong> {d['uuid']}</p>
+                            <h2 style="margin: 0; color: #2980b9; font-size: 20px;">Representación Impresa de CFDI</h2>
+                            <p style="margin: 5px 0 0 0; font-size: 12px; color: #7f8c8d;"><strong>UUID:</strong> {d['uuid']}</p>
                         </div>
                         <div style="text-align: right;">
                             <p style="margin: 0; font-size: 14px;"><strong>Serie y Folio:</strong> {d['serie']} {d['folio']}</p>
-                            <p style="margin: 3px 0 0 0; font-size: 13px; color: #7f8c8d;">Fecha y Hora: {d['fecha']} {d['hora']}</p>
+                            <p style="margin: 3px 0 0 0; font-size: 12px; color: #7f8c8d;">Fecha y Hora: {d['fecha']} {d['hora']}</p>
                         </div>
                     </div>
 
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
-                        <div style="width: 48%; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #2980b9; border-radius: 4px;">
-                            <h4 style="margin: 0 0 8px 0; color: #2980b9; font-size: 15px;">Datos del Emisor</h4>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>Nombre:</strong> {d['emi_nombre']}</p>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>RFC:</strong> {d['emi_rfc']}</p>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>Régimen Fiscal:</strong> {d['emi_regimen']}</p>
+                    <div class="box-container">
+                        <div class="box box-emisor">
+                            <h4 style="margin: 0 0 8px 0; color: #2980b9; font-size: 14px;">Datos del Emisor</h4>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>Nombre:</strong> {d['emi_nombre']}</p>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>RFC:</strong> {d['emi_rfc']}</p>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>Régimen Fiscal:</strong> {d['emi_regimen']}</p>
                         </div>
-                        <div style="width: 48%; padding: 15px; background-color: #f8f9fa; border-left: 4px solid #27ae60; border-radius: 4px;">
-                            <h4 style="margin: 0 0 8px 0; color: #27ae60; font-size: 15px;">Datos del Receptor</h4>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>Nombre:</strong> {d['rec_nombre']}</p>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>RFC:</strong> {d['rec_rfc']}</p>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>Régimen Receptor:</strong> {d['rec_regimen']}</p>
-                            <p style="margin: 3px 0; font-size: 13px;"><strong>Uso CFDI:</strong> {d['rec_uso']}</p>
+                        <div class="box box-receptor">
+                            <h4 style="margin: 0 0 8px 0; color: #27ae60; font-size: 14px;">Datos del Receptor</h4>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>Nombre:</strong> {d['rec_nombre']}</p>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>RFC:</strong> {d['rec_rfc']}</p>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>Régimen Receptor:</strong> {d['rec_regimen']}</p>
+                            <p style="margin: 3px 0; font-size: 12px;"><strong>Uso CFDI:</strong> {d['rec_uso']}</p>
                         </div>
                     </div>
 
-                    <h4 style="margin-bottom: 8px; color: #34495e; font-size: 15px; border-bottom: 1px solid #ecf0f1; padding-bottom: 5px;">Conceptos</h4>
-                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px;">
-                        <tr style="background-color: #2980b9; color: white;">
-                            <th style="padding: 8px; text-align: center; border: 1px solid #bdc3c7;">Cant.</th>
-                            <th style="padding: 8px; text-align: left; border: 1px solid #bdc3c7;">Descripción</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">Valor Unitario</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">Importe</th>
+                    <h4 style="margin-bottom: 8px; color: #34495e; font-size: 14px; border-bottom: 1px solid #ecf0f1; padding-bottom: 5px;">Conceptos</h4>
+                    <table>
+                        <tr>
+                            <th style="text-align: center; width: 40px;">Cant.</th>
+                            <th>Descripción</th>
+                            <th style="text-align: right;">Valor Unitario</th>
+                            <th style="text-align: right;">Importe</th>
                         </tr>
                 """
                 for c in d['conceptos']:
                     html_cfdi += f"""
                         <tr>
-                            <td style="padding: 8px; text-align: center; border: 1px solid #bdc3c7;">{c['cantidad']}</td>
-                            <td style="padding: 8px; text-align: left; border: 1px solid #bdc3c7;">{c['descripcion']}</td>
-                            <td style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">${c['valor_unitario']:,.2f}</td>
-                            <td style="padding: 8px; text-align: right; border: 1px solid #bdc3c7;">${c['importe']:,.2f}</td>
+                            <td style="text-align: center;">{c['cantidad']}</td>
+                            <td>{c['descripcion']}</td>
+                            <td style="text-align: right;">${c['valor_unitario']:,.2f}</td>
+                            <td style="text-align: right;">${c['importe']:,.2f}</td>
                         </tr>
                     """
                 
                 html_cfdi += f"""
                     </table>
 
-                    <div style="display: flex; justify-content: flex-end;">
-                        <div style="width: 320px; padding: 15px; background-color: #f8f9fa; border-radius: 6px; border: 1px solid #bdc3c7; font-size: 13px;">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                                <strong>Subtotal:</strong> <span>${d['subtotal']:,.2f}</span>
-                            </div>
+                    <div class="totals">
+                        <div class="totals-box">
+                            <div class="row"><strong>Subtotal:</strong> <span>${d['subtotal']:,.2f}</span></div>
                 """
                 if d['descuento'] > 0:
-                    html_cfdi += f"""
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
-                                <strong>Descuento:</strong> <span>-${d['descuento']:,.2f}</span>
-                            </div>
-                    """
+                    html_cfdi += f"""<div class="row" style="color: #c0392b;"><strong>Descuento:</strong> <span>-${d['descuento']:,.2f}</span></div>"""
                 if d['iva_trasladado'] > 0:
-                    html_cfdi += f"""
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                                <strong>I.V.A. (Trasladado):</strong> <span>${d['iva_trasladado']:,.2f}</span>
-                            </div>
-                    """
-                if d['retencion_isr'] > 0 if 'retencion_isr' in d else False: # por compatibilidad
-                    pass
+                    html_cfdi += f"""<div class="row"><strong>I.V.A. (Trasladado):</strong> <span>${d['iva_trasladado']:,.2f}</span></div>"""
                 if d['isr_retenido'] > 0:
-                    html_cfdi += f"""
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
-                                <strong>Retención I.S.R.:</strong> <span>-${d['isr_retenido']:,.2f}</span>
-                            </div>
-                    """
+                    html_cfdi += f"""<div class="row" style="color: #c0392b;"><strong>Retención I.S.R.:</strong> <span>-${d['isr_retenido']:,.2f}</span></div>"""
                 if d['iva_retenido'] > 0:
-                    html_cfdi += f"""
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #c0392b;">
-                                <strong>Retención I.V.A.:</strong> <span>-${d['iva_retenido']:,.2f}</span>
-                            </div>
-                    """
+                    html_cfdi += f"""<div class="row" style="color: #c0392b;"><strong>Retención I.V.A.:</strong> <span>-${d['iva_retenido']:,.2f}</span></div>"""
+                
                 html_cfdi += f"""
-                            <div style="display: flex; justify-content: space-between; font-size: 1.2em; border-top: 2px solid #bdc3c7; padding-top: 6px; margin-top: 6px; color: #2c3e50;">
-                                <strong>Total:</strong> <strong>${d['total']:,.2f} {d['moneda']}</strong>
+                            <div class="row total-final">
+                                <strong>Total:</strong> <span>${d['total']:,.2f} {d['moneda']}</span>
                             </div>
                         </div>
                     </div>
                 </div>
+                </body>
+                </html>
                 """
-                st.markdown(html_cfdi, unsafe_allow_html=True)
+                # Renderizar mediante componente HTML aislado (evita errores de sintaxis o texto plano en markdown)
+                components.html(html_cfdi, height=650, scrolling=True)
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para consultarlos aquí.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES (ORDEN CRONOLÓGICO DE MESES) ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
