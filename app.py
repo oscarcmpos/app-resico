@@ -25,18 +25,34 @@ supabase = init_connection()
 
 MESES_LISTA = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
-def obtener_mes_anterior(mes_actual, anio_actual):
+def calcular_iva_acumulado_anterior(cliente_id, mes_actual, anio_actual):
+    """
+    Suma de manera acumulativa los saldos a favor de IVA de todos los meses previos del mismo año.
+    """
     try:
-        idx = MESES_LISTA.index(mes_actual)
-        if idx == 0:
-            return "Diciembre", int(anio_actual) - 1
-        else:
-            return MESES_LISTA[idx - 1], int(anio_actual)
+        idx_actual = MESES_LISTA.index(mes_actual)
+        res = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id).eq("anio", int(anio_actual)).execute()
+        if not res.data:
+            return 0.0
+        
+        # Calcular el saldo neto acumulado mes a mes hasta antes del mes actual
+        iva_acumulado = 0.0
+        for m in MESES_LISTA[:idx_actual]:
+            mes_encontrado = next((item for item in res.data if item["mes"] == m), None)
+            if mes_encontrado:
+                val = float(mes_encontrado.get("iva_cargo_favor", 0.0))
+                # Si es negativo es a favor, si es positivo es a cargo
+                iva_acumulado += val 
+                
+        # Si el acumulado es negativo, significa que traemos saldo a favor neto
+        if iva_acumulado < 0:
+            return abs(iva_acumulado)
+        return 0.0
     except:
-        return None, anio_actual
+        return 0.0
 
 # ==========================================
-# 1. FUNCIONES DE PROCESAMIENTO (INTELIGENTE CON REPS TIPO P)
+# 1. FUNCIONES DE PROCESAMIENTO
 # ==========================================
 def procesar_ingreso_resico(archivo_subido):
     try:
@@ -194,7 +210,7 @@ def generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, totales):
             ["IVA Trasladado", totales['iva_trasladado']],
             ["IVA Acreditable (Filtrado)", totales['iva_acreditable']],
             ["IVA Retenido", totales['iva_retenido']],
-            ["IVA a Favor Anterior", totales['iva_favor_anterior']],
+            ["IVA a Favor Acumulado", totales['iva_favor_anterior']],
             [f"IVA a {totales['estatus_iva']}", "=B8-B9-B10-B11"]
         ]
         df_resumen = pd.DataFrame(wb_resumen_data[1:], columns=wb_resumen_data[0])
@@ -393,20 +409,11 @@ with tab_calc:
         
     st.divider()
     
-    iva_favor_anterior = 0.0
+    iva_favor_acumulado = 0.0
     if cliente_sel and lista_clientes:
         cli_obj = next((c for c in lista_clientes if c['nombre'] == cliente_sel), None)
         if cli_obj:
-            mes_ant, anio_ant = obtener_mes_anterior(mes_sel, anio_sel)
-            if mes_ant:
-                try:
-                    res_ant = supabase.table("historial_calculos").select("*").eq("cliente_id", cli_obj['id']).eq("mes", mes_ant).eq("anio", int(anio_ant)).execute()
-                    if res_ant.data:
-                        val_cargo_favor = float(res_ant.data[0].get("iva_cargo_favor", 0.0))
-                        if val_cargo_favor < 0:
-                            iva_favor_anterior = abs(val_cargo_favor)
-                except:
-                    pass
+            iva_favor_acumulado = calcular_iva_acumulado_anterior(cli_obj['id'], mes_sel, anio_sel)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -493,14 +500,14 @@ with tab_calc:
             iva_retenido_redondeado = round(total_iva_retenido)
             
             iva_neto_bruto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
-            iva_neto = iva_neto_bruto - round(iva_favor_anterior)
+            iva_neto = iva_neto_bruto - round(iva_favor_acumulado)
             estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
             
             st.divider()
             st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
             
-            if iva_favor_anterior > 0:
-                st.info(f"💡 **Acumulado Automático:** Se aplicó un IVA a favor arrastrado del mes anterior por **${iva_favor_anterior:,.0f}**.")
+            if iva_favor_acumulado > 0:
+                st.info(f"💡 **Acumulado Histórico:** Se aplicó un IVA a favor acumulado de periodos anteriores por **${iva_favor_acumulado:,.0f}**.")
 
             if df_excluidos is not None and not df_excluidos.empty:
                 st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se procesaron complementos de pago y se filtraron registros no acreditables.")
@@ -525,7 +532,7 @@ with tab_calc:
                 st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
                 st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
                 st.write(f"• IVA acreditable exacto (PUE + REP liberados): ${total_iva_acreditable:,.2f}")
-                st.write(f"• IVA a favor aplicado del periodo anterior: ${iva_favor_anterior:,.2f}")
+                st.write(f"• IVA a favor acumulado de periodos anteriores: ${iva_favor_acumulado:,.2f}")
 
             if df_excluidos is not None and not df_excluidos.empty:
                 with st.expander("🔍 Ver detalle de facturas excluidas / REPs informativos"):
@@ -562,7 +569,7 @@ with tab_calc:
                     'ingresos': ingresos_redondeados, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
                     'isr_retenido': isr_retenido_redondeado, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': iva_trasladado_redondeado,
                     'iva_acreditable': iva_acreditable_redondeado, 'iva_retenido': iva_retenido_redondeado,
-                    'iva_favor_anterior': round(iva_favor_anterior),
+                    'iva_favor_anterior': round(iva_favor_acumulado),
                     'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
                 }
                 archivo_excel = generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
