@@ -105,22 +105,15 @@ def procesar_gasto_inteligente(archivo_subido):
         estado = "Acreditable"
         motivo = "Válido para RESICO"
 
-        # 1. REGLA PRINCIPAL: El régimen del receptor DEBE SER ESTRICTAMENTE 626 (RESICO)
         if regimen_receptor != '626':
             estado = "Excluido"
             motivo = f"Régimen fiscal del receptor ({regimen_receptor}) no es RESICO (626)"
-
-        # 2. Bloquear método PPD (Requiere Complemento de Pago / REP)
         elif metodo_pago == 'PPD':
             estado = "Excluido"
             motivo = "Método PPD (Requiere REP para acreditar IVA)"
-
-        # 3. Bloquear tipos de comprobante que no son gastos operativos directos (Pagos o Nómina)
         elif tipo_comprobante in ['P', 'N']:
             estado = "Excluido"
             motivo = f"Comprobante tipo {tipo_comprobante} no genera IVA acreditable"
-
-        # 4. Bloquear Usos de CFDI estrictamente personales
         elif uso_cfdi in ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']:
             estado = "Excluido"
             motivo = f"Uso de CFDI ({uso_cfdi}) es deducción personal"
@@ -388,6 +381,27 @@ with tab_calc:
                 datos_gastos = [d for d in datos_gastos if d is not None]
                 if datos_gastos:
                     df_todos_gastos = pd.DataFrame(datos_gastos)
+                    
+                    # Separar automáticos válidos
+                    df_auto_acreditable = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
+                    
+                    # --- NUEVA FUNCIÓN: EXCLUSIÓN MANUAL DE FACTURAS ACREDITABLES ---
+                    excluir_manual = []
+                    if not df_auto_acreditable.empty:
+                        with st.expander("⚙️ Exclusión Manual Adicional de Gastos (Opcional)"):
+                            opciones_manuales = df_auto_acreditable["Archivo"].tolist()
+                            excluir_manual = st.multiselect(
+                                "Selecciona facturas que deseas omitir manualmente de la acreditación:",
+                                options=opciones_manuales,
+                                format_func=lambda x: f"{x} - {df_auto_acreditable[df_auto_acreditable['Archivo']==x]['Proveedor'].values[0]} (${df_auto_acreditable[df_auto_acreditable['Archivo']==x]['Subtotal Gasto'].values[0]:,.2f})"
+                            )
+                    
+                    # Aplicar exclusión manual si el usuario seleccionó alguna
+                    if excluir_manual:
+                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido"
+                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
+                        df_todos_gastos.loc[df_todos_gastos["Archivo"].isin(excluir_manual), "IVA Acreditable"] = 0.0
+
                     df_gastos = df_todos_gastos[df_todos_gastos["Estado"] == "Acreditable"]
                     df_excluidos = df_todos_gastos[df_todos_gastos["Estado"] == "Excluido"]
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum()
@@ -413,7 +427,7 @@ with tab_calc:
                 st.info(f"💡 **Acumulado Automático:** Se aplicó un IVA a favor arrastrado del mes anterior por **${iva_favor_anterior:,.0f}**.")
 
             if df_excluidos is not None and not df_excluidos.empty:
-                st.warning(f"🛡️ **Filtro Estricto RESICO (626):** Se excluyeron **{len(df_excluidos)} factura(s)** que no tienen régimen 626 en el receptor, PPD sin REP o son personales.")
+                st.warning(f"🛡️ **Filtro Estricto RESICO (626):** Se excluyeron **{len(df_excluidos)} factura(s)** por régimen incorrecto, PPD sin REP, exclusión manual o uso personal.")
 
             st.subheader("Determinación de ISR (Redondeado oficial SAT)")
             c1, c2, c3, c4 = st.columns(4)
@@ -438,7 +452,7 @@ with tab_calc:
                 st.write(f"• IVA a favor aplicado del periodo anterior: ${iva_favor_anterior:,.2f}")
 
             if df_excluidos is not None and not df_excluidos.empty:
-                with st.expander("🔍 Ver detalle de facturas excluidas por el filtro estricto RESICO"):
+                with st.expander("🔍 Ver detalle de facturas excluidas"):
                     st.dataframe(df_excluidos[["Archivo", "Proveedor", "Regimen Receptor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
 
             st.divider()
@@ -448,7 +462,7 @@ with tab_calc:
                 if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
                     cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
                     
-                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", int(anio_sel)).execute()
+                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
                     if viejo.data:
                         supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
                     
