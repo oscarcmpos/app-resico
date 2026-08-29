@@ -23,6 +23,19 @@ def init_connection():
 
 supabase = init_connection()
 
+# Listado de meses para cálculo de periodos anteriores
+MESES_LISTA = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+def obtener_mes_anterior(mes_actual, anio_actual):
+    try:
+        idx = MESES_LISTA.index(mes_actual)
+        if idx == 0:
+            return "Diciembre", int(anio_actual) - 1
+        else:
+            return MESES_LISTA[idx - 1], int(anio_actual)
+    except:
+        return None, anio_actual
+
 # ==========================================
 # 1. FUNCIONES DE PROCESAMIENTO (CÁLCULO Y REDONDEO)
 # ==========================================
@@ -133,7 +146,8 @@ def generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, totales):
             ["IVA Trasladado", totales['iva_trasladado']],
             ["IVA Acreditable (Filtrado)", totales['iva_acreditable']],
             ["IVA Retenido", totales['iva_retenido']],
-            [f"IVA a {totales['estatus_iva']}", "=B8-B9-B10"]
+            ["IVA a Favor Anterior", totales['iva_favor_anterior']],
+            [f"IVA a {totales['estatus_iva']}", "=B8-B9-B10-B11"]
         ]
         df_resumen = pd.DataFrame(wb_resumen_data[1:], columns=wb_resumen_data[0])
         df_resumen.to_excel(writer, sheet_name='Resumen Fiscal', index=False)
@@ -305,12 +319,28 @@ with tab_calc:
                             st.error(f"Error al eliminar: {e}")
     
     with col_mes:
-        mes_sel = st.selectbox("Mes", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
+        mes_sel = st.selectbox("Mes", MESES_LISTA)
     with col_anio:
         anio_sel = st.selectbox("Año", [2024, 2025, 2026, 2027])
         
     st.divider()
     
+    # Búsqueda automática de saldos a favor del mes anterior en Supabase
+    iva_favor_anterior = 0.0
+    if cliente_sel and lista_clientes:
+        cli_obj = next((c for c in lista_clientes if c['nombre'] == cliente_sel), None)
+        if cli_obj:
+            mes_ant, anio_ant = obtener_mes_anterior(mes_sel, anio_sel)
+            if mes_ant:
+                try:
+                    res_ant = supabase.table("historial_calculos").select("*").eq("cliente_id", cli_obj['id']).eq("mes", mes_ant).eq("anio", int(anio_ant)).execute()
+                    if res_ant.data:
+                        val_cargo_favor = float(res_ant.data[0].get("iva_cargo_favor", 0.0))
+                        if val_cargo_favor < 0:
+                            iva_favor_anterior = abs(val_cargo_favor)
+                except:
+                    pass
+
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. Ingresos (XML Emitidos)")
@@ -355,12 +385,18 @@ with tab_calc:
             iva_trasladado_redondeado = round(total_iva_trasladado)
             iva_acreditable_redondeado = round(total_iva_acreditable)
             iva_retenido_redondeado = round(total_iva_retenido)
-            iva_neto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
+            
+            # Cálculo de IVA Neto considerando el remanente arrastrado del mes anterior
+            iva_neto_bruto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
+            iva_neto = iva_neto_bruto - round(iva_favor_anterior)
             estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
             
             st.divider()
             st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
             
+            if iva_favor_anterior > 0:
+                st.info(f"💡 **Acumulado Automático:** Se aplicó un IVA a favor arrastrado del mes anterior por **${iva_favor_anterior:,.0f}**.")
+
             if df_excluidos is not None and not df_excluidos.empty:
                 st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se excluyeron **{len(df_excluidos)} factura(s)** (Régimen 605 o personales).")
 
@@ -384,6 +420,7 @@ with tab_calc:
                 st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
                 st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
                 st.write(f"• IVA acreditable exacto: ${total_iva_acreditable:,.2f}")
+                st.write(f"• IVA a favor aplicado del periodo anterior: ${iva_favor_anterior:,.2f}")
 
             st.divider()
             col_btn1, col_btn2 = st.columns(2)
@@ -392,7 +429,7 @@ with tab_calc:
                 if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
                     cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
                     
-                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", anio_sel).execute()
+                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", int(anio_sel)).execute()
                     if viejo.data:
                         supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
                     
@@ -407,7 +444,7 @@ with tab_calc:
                     }
                     try:
                         supabase.table("historial_calculos").insert(datos_insertar).execute()
-                        st.success("✅ Cálculo guardado con éxito en la base de datos.")
+                        st.success("✅ Cálculo guardado y listo para arrastrar saldo al siguiente mes.")
                     except Exception as e:
                         st.error(f"Error al guardar en Supabase: {e}")
 
@@ -416,6 +453,7 @@ with tab_calc:
                     'ingresos': ingresos_redondeados, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
                     'isr_retenido': isr_retenido_redondeado, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': iva_trasladado_redondeado,
                     'iva_acreditable': iva_acreditable_redondeado, 'iva_retenido': iva_retenido_redondeado,
+                    'iva_favor_anterior': round(iva_favor_anterior),
                     'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
                 }
                 archivo_excel = generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
@@ -521,7 +559,7 @@ with tab_visor:
     else:
         st.info("Sube archivos XML en la pestaña de 'Calculadora Mensual' para consultarlos aquí.")
 
-# --- PESTAÑA 3: HISTORIAL Y ACUSES (LECTOR PDF ROBUSTO) ---
+# --- PESTAÑA 3: HISTORIAL Y ACUSES ---
 with tab_historial:
     st.header("🗂️ Historial Mensual y Verificación de Acuses")
     
@@ -549,7 +587,6 @@ with tab_historial:
                         with pdfplumber.open(acuse_pdf) as pdf:
                             for p in pdf.pages: texto_pdf += p.extract_text() + "\n"
                         
-                        # NUEVO PATRÓN: Captura cualquier número con o sin decimales y comas en todo el texto del PDF
                         cantidades = re.findall(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\b", texto_pdf)
                         
                         if cantidades:
