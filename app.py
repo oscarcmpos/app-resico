@@ -72,9 +72,6 @@ def procesar_ingreso_resico(archivo_subido):
         return None
 
 def procesar_gasto_o_pago(archivo_subido):
-    """
-    Procesa tanto facturas de gastos (PUE/PPD) como Complementos de Pago (REP tipo P).
-    """
     try:
         archivo_subido.seek(0)
         tree = ET.parse(archivo_subido)
@@ -86,13 +83,11 @@ def procesar_gasto_o_pago(archivo_subido):
         
         tipo_comprobante = root.attrib.get('TipoDeComprobante', '')
         
-        # CASO 1: ES UN COMPLEMENTO DE PAGO (REP TIPO P)
         if tipo_comprobante == 'P':
             emisor = root.find('cfdi:Emisor', ns)
             nombre_emisor = emisor.attrib.get('Nombre', 'Proveedor REP') if emisor is not None else 'Proveedor REP'
             rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
             
-            # Buscar los UUIDs relacionados y el IVA pagado en el complemento de pagos 2.0
             iva_pagado_rep = 0.0
             uuids_relacionados = []
             
@@ -104,7 +99,6 @@ def procesar_gasto_o_pago(archivo_subido):
                     if uuid_rel:
                         uuids_relacionados.append(uuid_rel.upper())
                 
-                # Extraer IVA de los traslados del pago
                 traslados_p = pago.findall('.//pago20:TrasladoP', ns)
                 for t_p in traslados_p:
                     if t_p.attrib.get('ImpuestoP') == '002':
@@ -122,7 +116,6 @@ def procesar_gasto_o_pago(archivo_subido):
                 "Motivo Rechazo": "Complemento de Pago que libera IVA de PPD"
             }
 
-        # CASO 2: ES UNA FACTURA DE GASTO CONVENCIONAL (I o E)
         emisor = root.find('cfdi:Emisor', ns)
         rfc_emisor = emisor.attrib.get('Rfc', '') if emisor is not None else ''
         nombre_emisor = emisor.attrib.get('Nombre', 'Desconocido') if emisor is not None else 'Desconocido'
@@ -134,7 +127,6 @@ def procesar_gasto_o_pago(archivo_subido):
         
         metodo_pago = root.attrib.get('MetodoPago', '')
         
-        # Extraer UUID del timbre fiscal digital
         tfd = root.find('.//tfd:TimbreFiscalDigital', {'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'})
         uuid_factura = tfd.attrib.get('UUID', '').upper() if tfd is not None else ''
 
@@ -156,7 +148,7 @@ def procesar_gasto_o_pago(archivo_subido):
             estado = "Excluido"
             motivo = f"Régimen fiscal del receptor ({regimen_receptor}) no es RESICO (626)"
         elif metodo_pago == 'PPD':
-            estado = "PPD Pendiente"  # Se quedará en pendiente hasta que llegue su REP
+            estado = "PPD Pendiente"
             motivo = "Método PPD (Esperando Complemento de Pago / REP)"
         elif uso_cfdi in ['D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10']:
             estado = "Excluido"
@@ -221,11 +213,17 @@ def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
         ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4'}
         
         fecha = root.attrib.get('Fecha', '')[:10]
-        total = root.attrib.get('Total', '0.00')
         tipo = root.attrib.get('TipoDeComprobante', '')
         metodo = root.attrib.get('MetodoPago', 'N/A')
         
-        if tipo == 'P': metodo = 'Pago (Complemento)'
+        total = 0.0
+        if tipo == 'P':
+            metodo = 'Pago (Complemento)'
+            pagos = root.findall('.//{http://www.sat.gob.mx/Pagos20}Pago')
+            for p in pagos:
+                total += float(p.attrib.get('Monto', 0.0))
+        else:
+            total = float(root.attrib.get('Total', '0.00'))
             
         if tipo_archivo == 'ingreso':
             nodo = root.find('cfdi:Receptor', ns)
@@ -238,9 +236,9 @@ def obtener_metadatos_basicos(archivo_subido, tipo_archivo):
             "nombre_archivo": archivo_subido.name,
             "fecha": fecha,
             "entidad": nombre,
-            "total": float(total),
+            "total": total,
             "metodo": metodo,
-            "display": f"{fecha} | {nombre} | ${float(total):,.2f} | {metodo}"
+            "display": f"{fecha} | {nombre} | ${total:,.2f} | {metodo}"
         }
     except:
         return None
@@ -249,7 +247,9 @@ def extraer_cfdi_completo(archivo_subido):
     archivo_subido.seek(0)
     tree = ET.parse(archivo_subido)
     root = tree.getroot()
-    ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4', 'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'}
+    ns = {'cfdi': 'http://www.sat.gob.mx/cfd/4', 'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital', 'pago20': 'http://www.sat.gob.mx/Pagos20'}
+    
+    tipo_comp = root.attrib.get('TipoDeComprobante', '')
     
     datos = {
         "fecha": root.attrib.get('Fecha', ''),
@@ -265,6 +265,21 @@ def extraer_cfdi_completo(archivo_subido):
         "isr_retenido": 0.0,
         "iva_retenido": 0.0
     }
+    
+    if tipo_comp == 'P':
+        monto_total_pago = 0.0
+        pagos = root.findall('.//pago20:Pago', ns)
+        for p in pagos:
+            monto_total_pago += float(p.attrib.get('Monto', 0.0))
+            
+        datos["subtotal"] = monto_total_pago
+        datos["total"] = monto_total_pago
+        datos["conceptos"].append({
+            "cantidad": "1",
+            "descripcion": "Complemento de Recepción de Pagos (REP)",
+            "valor_unitario": monto_total_pago,
+            "importe": monto_total_pago
+        })
     
     emisor = root.find('cfdi:Emisor', ns)
     datos["emi_rfc"] = emisor.attrib.get('Rfc', '') if emisor is not None else ''
@@ -282,7 +297,7 @@ def extraer_cfdi_completo(archivo_subido):
         if tfd is not None: datos["uuid"] = tfd.attrib.get('UUID', '')
             
     conceptos = root.find('cfdi:Conceptos', ns)
-    if conceptos is not None:
+    if conceptos is not None and tipo_comp != 'P':
         for c in conceptos.findall('cfdi:Concepto', ns):
             datos["conceptos"].append({
                 "cantidad": c.attrib.get('Cantidad', '0'),
@@ -426,30 +441,22 @@ with tab_calc:
                 if resultados_brutos:
                     df_todos = pd.DataFrame(resultados_brutos)
                     
-                    # Separar facturas y REPs
                     df_facturas = df_todos[df_todos["TipoRegistro"] == "Factura"].copy()
                     df_reps = df_todos[df_todos["TipoRegistro"] == "REP"].copy()
                     
-                    # --- CONCILIACIÓN PPD vs REP AUTOMÁTICA ---
-                    # Si hay un REP que paga un PPD, pasamos el PPD de "PPD Pendiente" a "Acreditable"
                     uuid_acreditados_por_rep = []
                     for _, rep in df_reps.iterrows():
                         for uuid_rel in rep["UUIDs Relacionados"]:
                             uuid_acreditados_por_rep.append(uuid_rel)
                     
-                    # Actualizar estado de las facturas PPD que ya tienen su REP en los XMLs subidos
                     if uuid_acreditados_por_rep:
                         mask_ppd_pagado = df_facturas["UUID"].isin(uuid_acreditados_por_rep) & (df_facturas["Estado"] == "PPD Pendiente")
                         df_facturas.loc[mask_ppd_pagado, "Estado"] = "Acreditable"
                         df_facturas.loc[mask_ppd_pagado, "Motivo Rechazo"] = "PPD Liberado mediante Complemento de Pago (REP)"
 
-                    # Añadir el IVA de los REPs directos al acumulado acreditable y mandar REPs a excluidos/informativos
                     iva_extra_reps = df_reps["IVA Acreditable"].sum()
-                    
-                    # Separar acreditables definitivos
                     df_gastos = df_facturas[df_facturas["Estado"] == "Acreditable"].copy()
                     
-                    # Todo lo demás va a excluidos/informativos (incluyendo REPs informativos y PPDs sin pagar)
                     df_excluidos = pd.concat([
                         df_facturas[df_facturas["Estado"] != "Acreditable"],
                         df_reps
@@ -457,7 +464,6 @@ with tab_calc:
                     
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
                     
-                    # --- EXCLUSIÓN MANUAL ADICIONAL ---
                     excluir_manual = []
                     if not df_gastos.empty:
                         with st.expander("⚙️ Exclusión Manual Adicional de Gastos (Opcional)"):
@@ -472,7 +478,6 @@ with tab_calc:
                         df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido Manual"
                         df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
                         
-                        # Mover de acreditables a excluidos
                         df_excluidos = pd.concat([df_excluidos, df_gastos[df_gastos["Archivo"].isin(excluir_manual)]], ignore_index=True)
                         df_gastos = df_gastos[~df_gastos["Archivo"].isin(excluir_manual)]
                         total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
