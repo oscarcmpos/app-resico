@@ -27,7 +27,8 @@ MESES_LISTA = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "
 
 def calcular_iva_acumulado_anterior(cliente_id, mes_actual, anio_actual):
     """
-    Suma de manera acumulativa los saldos a favor de IVA de todos los meses previos del mismo año.
+    Calcula el saldo de IVA a favor acumulado de meses anteriores mediante un 
+    modelo de rollover cronológico (los saldos a favor se suman y los cargos los consumen).
     """
     try:
         idx_actual = MESES_LISTA.index(mes_actual)
@@ -35,19 +36,19 @@ def calcular_iva_acumulado_anterior(cliente_id, mes_actual, anio_actual):
         if not res.data:
             return 0.0
         
-        # Calcular el saldo neto acumulado mes a mes hasta antes del mes actual
-        iva_acumulado = 0.0
+        disponible = 0.0
         for m in MESES_LISTA[:idx_actual]:
             mes_encontrado = next((item for item in res.data if item["mes"] == m), None)
             if mes_encontrado:
                 val = float(mes_encontrado.get("iva_cargo_favor", 0.0))
-                # Si es negativo es a favor, si es positivo es a cargo
-                iva_acumulado += val 
-                
-        # Si el acumulado es negativo, significa que traemos saldo a favor neto
-        if iva_acumulado < 0:
-            return abs(iva_acumulado)
-        return 0.0
+                if val < 0:
+                    disponible += abs(val)
+                elif val > 0:
+                    disponible -= val
+                    if disponible < 0:
+                        disponible = 0.0
+                        
+        return disponible
     except:
         return 0.0
 
