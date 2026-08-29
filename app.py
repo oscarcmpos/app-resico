@@ -26,10 +26,6 @@ supabase = init_connection()
 MESES_LISTA = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 def calcular_iva_acumulado_anterior(cliente_id, mes_actual, anio_actual):
-    """
-    Calcula el saldo de IVA a favor acumulado de meses anteriores mediante un 
-    modelo de rollover cronológico (los saldos a favor se suman y los cargos los consumen).
-    """
     try:
         idx_actual = MESES_LISTA.index(mes_actual)
         res = supabase.table("historial_calculos").select("*").eq("cliente_id", cliente_id).eq("anio", int(anio_actual)).execute()
@@ -217,7 +213,7 @@ def generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, totales):
         df_resumen = pd.DataFrame(wb_resumen_data[1:], columns=wb_resumen_data[0])
         df_resumen.to_excel(writer, sheet_name='Resumen Fiscal', index=False)
         
-        if not df_ingresos.empty: df_ingresos.to_excel(writer, sheet_name='Detalle Ingresos', index=False)
+        if df_ingresos is not None and not df_ingresos.empty: df_ingresos.to_excel(writer, sheet_name='Detalle Ingresos', index=False)
         if df_gastos is not None and not df_gastos.empty: df_gastos.to_excel(writer, sheet_name='Gastos Acreditables', index=False)
         if df_excluidos is not None and not df_excluidos.empty: df_excluidos.to_excel(writer, sheet_name='Gastos Excluidos', index=False)
     return buffer.getvalue()
@@ -424,157 +420,162 @@ with tab_calc:
         st.subheader("2. Gastos y Pagos (XML Recibidos + REPs)", help="Sube tus facturas (PUE/PPD) y sus complementos de pago tipo P")
         xml_gastos = st.file_uploader("Sube facturas y complementos", type=['xml'], accept_multiple_files=True, key=f"gas_{st.session_state.reset_key}")
 
-    if xml_ingresos:
-        datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
-        datos_ingresos = [d for d in datos_ingresos if d is not None] 
+    # PERMITIR CÁLCULO SI HAY INGRESOS O GASTOS SUBIDOS
+    if xml_ingresos or xml_gastos:
+        total_ingresos = 0.0
+        total_iva_trasladado = 0.0
+        total_isr_retenido = 0.0
+        total_iva_retenido = 0.0
+        df_ingresos = pd.DataFrame()
+
+        if xml_ingresos:
+            datos_ingresos = [procesar_ingreso_resico(x) for x in xml_ingresos]
+            datos_ingresos = [d for d in datos_ingresos if d is not None] 
+            if datos_ingresos:
+                df_ingresos = pd.DataFrame(datos_ingresos)
+                total_ingresos = df_ingresos["Subtotal"].sum()
+                total_iva_trasladado = df_ingresos["IVA Trasladado"].sum()
+                total_isr_retenido = df_ingresos["ISR Retenido"].sum()
+                total_iva_retenido = df_ingresos["IVA Retenido"].sum()
         
-        if not datos_ingresos:
-            st.error("⚠️ Ninguno de los XML subidos corresponde al Régimen RESICO (626).")
-        else:
-            df_ingresos = pd.DataFrame(datos_ingresos)
+        total_iva_acreditable = 0.0
+        df_gastos = pd.DataFrame()
+        df_excluidos = pd.DataFrame()
+        
+        if xml_gastos:
+            resultados_brutos = [procesar_gasto_o_pago(x) for x in xml_gastos]
+            resultados_brutos = [r for r in resultados_brutos if r is not None]
             
-            total_ingresos = df_ingresos["Subtotal"].sum()
-            total_iva_trasladado = df_ingresos["IVA Trasladado"].sum()
-            total_isr_retenido = df_ingresos["ISR Retenido"].sum()
-            total_iva_retenido = df_ingresos["IVA Retenido"].sum()
-            
-            total_iva_acreditable = 0.0
-            df_gastos = None
-            df_excluidos = None
-            
-            if xml_gastos:
-                resultados_brutos = [procesar_gasto_o_pago(x) for x in xml_gastos]
-                resultados_brutos = [r for r in resultados_brutos if r is not None]
+            if resultados_brutos:
+                df_todos = pd.DataFrame(resultados_brutos)
                 
-                if resultados_brutos:
-                    df_todos = pd.DataFrame(resultados_brutos)
-                    
-                    df_facturas = df_todos[df_todos["TipoRegistro"] == "Factura"].copy()
-                    df_reps = df_todos[df_todos["TipoRegistro"] == "REP"].copy()
-                    
-                    uuid_acreditados_por_rep = []
+                df_facturas = df_todos[df_todos["TipoRegistro"] == "Factura"].copy() if "TipoRegistro" in df_todos.columns else pd.DataFrame()
+                df_reps = df_todos[df_todos["TipoRegistro"] == "REP"].copy() if "TipoRegistro" in df_todos.columns else pd.DataFrame()
+                
+                uuid_acreditados_por_rep = []
+                if not df_reps.empty:
                     for _, rep in df_reps.iterrows():
                         for uuid_rel in rep["UUIDs Relacionados"]:
                             uuid_acreditados_por_rep.append(uuid_rel)
-                    
-                    if uuid_acreditados_por_rep:
-                        mask_ppd_pagado = df_facturas["UUID"].isin(uuid_acreditados_por_rep) & (df_facturas["Estado"] == "PPD Pendiente")
-                        df_facturas.loc[mask_ppd_pagado, "Estado"] = "Acreditable"
-                        df_facturas.loc[mask_ppd_pagado, "Motivo Rechazo"] = "PPD Liberado mediante Complemento de Pago (REP)"
+                
+                if uuid_acreditados_por_rep and not df_facturas.empty:
+                    mask_ppd_pagado = df_facturas["UUID"].isin(uuid_acreditados_por_rep) & (df_facturas["Estado"] == "PPD Pendiente")
+                    df_facturas.loc[mask_ppd_pagado, "Estado"] = "Acreditable"
+                    df_facturas.loc[mask_ppd_pagado, "Motivo Rechazo"] = "PPD Liberado mediante Complemento de Pago (REP)"
 
-                    iva_extra_reps = df_reps["IVA Acreditable"].sum()
-                    df_gastos = df_facturas[df_facturas["Estado"] == "Acreditable"].copy()
+                iva_extra_reps = df_reps["IVA Acreditable"].sum() if not df_reps.empty else 0.0
+                df_gastos = df_facturas[df_facturas["Estado"] == "Acreditable"].copy() if not df_facturas.empty else pd.DataFrame()
+                
+                df_excluidos = pd.concat([
+                    df_facturas[df_facturas["Estado"] != "Acreditable"] if not df_facturas.empty else pd.DataFrame(),
+                    df_reps
+                ], ignore_index=True) if not df_reps.empty or not df_facturas.empty else pd.DataFrame()
+                
+                total_iva_acreditable = (df_gastos["IVA Acreditable"].sum() if not df_gastos.empty else 0.0) + iva_extra_reps
+                
+                excluir_manual = []
+                if not df_gastos.empty:
+                    with st.expander("⚙️ Exclusión Manual Adicional de Gastos (Opcional)"):
+                        opciones_manuales = df_gastos["Archivo"].tolist()
+                        excluir_manual = st.multiselect(
+                            "Selecciona facturas que deseas omitir manualmente de la acreditación:",
+                            options=opciones_manuales,
+                            format_func=lambda x: f"{x} - {df_gastos[df_gastos['Archivo']==x]['Proveedor'].values[0]} (${df_gastos[df_gastos['Archivo']==x]['Subtotal Gasto'].values[0]:,.2f})"
+                        )
+                
+                if excluir_manual:
+                    df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido Manual"
+                    df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
                     
-                    df_excluidos = pd.concat([
-                        df_facturas[df_facturas["Estado"] != "Acreditable"],
-                        df_reps
-                    ], ignore_index=True)
-                    
+                    df_excluidos = pd.concat([df_excluidos, df_gastos[df_gastos["Archivo"].isin(excluir_manual)]], ignore_index=True)
+                    df_gastos = df_gastos[~df_gastos["Archivo"].isin(excluir_manual)]
                     total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
-                    
-                    excluir_manual = []
-                    if not df_gastos.empty:
-                        with st.expander("⚙️ Exclusión Manual Adicional de Gastos (Opcional)"):
-                            opciones_manuales = df_gastos["Archivo"].tolist()
-                            excluir_manual = st.multiselect(
-                                "Selecciona facturas que deseas omitir manualmente de la acreditación:",
-                                options=opciones_manuales,
-                                format_func=lambda x: f"{x} - {df_gastos[df_gastos['Archivo']==x]['Proveedor'].values[0]} (${df_gastos[df_gastos['Archivo']==x]['Subtotal Gasto'].values[0]:,.2f})"
-                            )
-                    
-                    if excluir_manual:
-                        df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Estado"] = "Excluido Manual"
-                        df_gastos.loc[df_gastos["Archivo"].isin(excluir_manual), "Motivo Rechazo"] = "Exclusión manual por el contador"
-                        
-                        df_excluidos = pd.concat([df_excluidos, df_gastos[df_gastos["Archivo"].isin(excluir_manual)]], ignore_index=True)
-                        df_gastos = df_gastos[~df_gastos["Archivo"].isin(excluir_manual)]
-                        total_iva_acreditable = df_gastos["IVA Acreditable"].sum() + iva_extra_reps
 
-            ingresos_redondeados = round(total_ingresos)
-            isr_determinado, tasa_aplicada = calcular_isr_resico(ingresos_redondeados)
-            isr_determinado = round(isr_determinado)
-            isr_retenido_redondeado = round(total_isr_retenido)
-            isr_a_pagar = max(0, isr_determinado - isr_retenido_redondeado)
-            
-            iva_trasladado_redondeado = round(total_iva_trasladado)
-            iva_acreditable_redondeado = round(total_iva_acreditable)
-            iva_retenido_redondeado = round(total_iva_retenido)
-            
-            iva_neto_bruto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
-            iva_neto = iva_neto_bruto - round(iva_favor_acumulado)
-            estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
-            
-            st.divider()
-            st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
-            
-            if iva_favor_acumulado > 0:
-                st.info(f"💡 **Acumulado Histórico:** Se aplicó un IVA a favor acumulado de periodos anteriores por **${iva_favor_acumulado:,.0f}**.")
+        ingresos_redondeados = round(total_ingresos)
+        isr_determinado, tasa_aplicada = calcular_isr_resico(ingresos_redondeados)
+        isr_determinado = round(isr_determinado)
+        isr_retenido_redondeado = round(total_isr_retenido)
+        isr_a_pagar = max(0, isr_determinado - isr_retenido_redondeado)
+        
+        iva_trasladado_redondeado = round(total_iva_trasladado)
+        iva_acreditable_redondeado = round(total_iva_acreditable)
+        iva_retenido_redondeado = round(total_iva_retenido)
+        
+        iva_neto_bruto = iva_trasladado_redondeado - iva_acreditable_redondeado - iva_retenido_redondeado
+        iva_neto = iva_neto_bruto - round(iva_favor_acumulado)
+        estatus_iva = "Cargo" if iva_neto > 0 else "Favor"
+        
+        st.divider()
+        st.header(f"📊 Resumen del Cálculo: {mes_sel} {anio_sel}")
+        
+        if iva_favor_acumulado > 0:
+            st.info(f"💡 **Acumulado Histórico:** Se aplicó un IVA a favor acumulado de periodos anteriores por **${iva_favor_acumulado:,.0f}**.")
 
-            if df_excluidos is not None and not df_excluidos.empty:
-                st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se procesaron complementos de pago y se filtraron registros no acreditables.")
+        if not df_excluidos.empty:
+            st.warning(f"🛡️ **Filtro Inteligente RESICO:** Se procesaron complementos de pago y se filtraron registros no acreditables.")
 
-            st.subheader("Determinación de ISR (Redondeado oficial SAT)")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Ingresos Base", f"${ingresos_redondeados:,.0f}")
-            c2.metric(f"ISR Determinado ({(tasa_aplicada*100):.2f}%)", f"${isr_determinado:,.0f}")
-            c3.metric("ISR Retenido", f"- ${isr_retenido_redondeado:,.0f}")
-            c4.metric("ISR a Pagar", f"${isr_a_pagar:,.0f}", delta="Pago requerido", delta_color="inverse")
-            
-            st.subheader("Determinación de IVA (Redondeado oficial SAT)")
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("IVA Trasladado", f"${iva_trasladado_redondeado:,.0f}")
-            c6.metric("IVA Acreditable (Incluye PPD liberados por REP)", f"- ${iva_acreditable_redondeado:,.0f}")
-            c7.metric("IVA Retenido", f"- ${iva_retenido_redondeado:,.0f}")
-            
-            color_iva = "normal" if iva_neto < 0 else "inverse"
-            c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.0f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
+        st.subheader("Determinación de ISR (Redondeado oficial SAT)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Ingresos Base", f"${ingresos_redondeados:,.0f}")
+        c2.metric(f"ISR Determinado ({(tasa_aplicada*100):.2f}%)", f"${isr_determinado:,.0f}")
+        c3.metric("ISR Retenido", f"- ${isr_retenido_redondeado:,.0f}")
+        c4.metric("ISR a Pagar", f"${isr_a_pagar:,.0f}", delta="Pago requerido", delta_color="inverse")
+        
+        st.subheader("Determinación de IVA (Redondeado oficial SAT)")
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("IVA Trasladado", f"${iva_trasladado_redondeado:,.0f}")
+        c6.metric("IVA Acreditable (Incluye PPD liberados por REP)", f"- ${iva_acreditable_redondeado:,.0f}")
+        c7.metric("IVA Retenido", f"- ${iva_retenido_redondeado:,.0f}")
+        
+        color_iva = "normal" if iva_neto < 0 else "inverse"
+        c8.metric(f"IVA a {estatus_iva}", f"${abs(iva_neto):,.0f}", delta=f"Saldo a {estatus_iva}", delta_color=color_iva)
 
-            with st.expander("🔎 Ver detalle completo con decimales exactos"):
-                st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
-                st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
-                st.write(f"• IVA acreditable exacto (PUE + REP liberados): ${total_iva_acreditable:,.2f}")
-                st.write(f"• IVA a favor acumulado de periodos anteriores: ${iva_favor_acumulado:,.2f}")
+        with st.expander("🔎 Ver detalle completo con decimales exactos"):
+            st.write(f"• Ingresos exactos: ${total_ingresos:,.2f}")
+            st.write(f"• IVA trasladado exacto: ${total_iva_trasladado:,.2f}")
+            st.write(f"• IVA acreditable exacto (PUE + REP liberados): ${total_iva_acreditable:,.2f}")
+            st.write(f"• IVA a favor acumulado de periodos anteriores: ${iva_favor_acumulado:,.2f}")
 
-            if df_excluidos is not None and not df_excluidos.empty:
-                with st.expander("🔍 Ver detalle de facturas excluidas / REPs informativos"):
-                    st.dataframe(df_excluidos[["Archivo", "Proveedor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
+        if not df_excluidos.empty:
+            with st.expander("🔍 Ver detalle de facturas excluidas / REPs informativos"):
+                st.dataframe(df_excluidos[["Archivo", "Proveedor", "Método Pago", "Motivo Rechazo"]], use_container_width=True)
 
-            st.divider()
-            col_btn1, col_btn2 = st.columns(2)
-            
-            with col_btn1:
-                if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
-                    cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
-                    
-                    viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", int(anio_sel)).execute()
-                    if viejo.data:
-                        supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
-                    
-                    datos_insertar = {
-                        "cliente_id": cliente_id, 
-                        "mes": mes_sel, 
-                        "anio": int(anio_sel),
-                        "ingresos_base": float(ingresos_redondeados), 
-                        "isr_determinado": float(isr_a_pagar),
-                        "iva_cargo_favor": float(iva_neto), 
-                        "estatus": "Guardado / Pendiente de Acuse"
-                    }
-                    try:
-                        supabase.table("historial_calculos").insert(datos_insertar).execute()
-                        st.success("✅ Cálculo guardado y listo para arrastrar saldo al siguiente mes.")
-                    except Exception as e:
-                        st.error(f"Error al guardar en Supabase: {e}")
-
-            with col_btn2:
-                diccionario_totales = {
-                    'ingresos': ingresos_redondeados, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
-                    'isr_retenido': isr_retenido_redondeado, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': iva_trasladado_redondeado,
-                    'iva_acreditable': iva_acreditable_redondeado, 'iva_retenido': iva_retenido_redondeado,
-                    'iva_favor_anterior': round(iva_favor_acumulado),
-                    'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
+        st.divider()
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if cliente_sel and st.button("💾 Guardar Cálculo en Base de Datos", use_container_width=True):
+                cliente_id = next(c['id'] for c in lista_clientes if c['nombre'] == cliente_sel)
+                
+                viejo = supabase.table("historial_calculos").select("id").eq("cliente_id", cliente_id).eq("mes", mes_sel).eq("anio", int(anio_sel)).execute()
+                if viejo.data:
+                    supabase.table("historial_calculos").delete().eq("id", viejo.data[0]["id"]).execute()
+                
+                datos_insertar = {
+                    "cliente_id": cliente_id, 
+                    "mes": mes_sel, 
+                    "anio": int(anio_sel),
+                    "ingresos_base": float(ingresos_redondeados), 
+                    "isr_determinado": float(isr_a_pagar),
+                    "iva_cargo_favor": float(iva_neto), 
+                    "estatus": "Guardado / Pendiente de Acuse"
                 }
-                archivo_excel = generar_excel_formulado(df_ingresos, df_gastos, df_excluidos, diccionario_totales)
-                st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                try:
+                    supabase.table("historial_calculos").insert(datos_insertar).execute()
+                    st.success("✅ Cálculo guardado y listo para arrastrar saldo al siguiente mes.")
+                except Exception as e:
+                    st.error(f"Error al guardar en Supabase: {e}")
+
+        with col_btn2:
+            diccionario_totales = {
+                'ingresos': ingresos_redondeados, 'tasa': tasa_aplicada, 'isr_determinado': isr_determinado,
+                'isr_retenido': isr_retenido_redondeado, 'isr_a_pagar': isr_a_pagar, 'iva_trasladado': iva_trasladado_redondeado,
+                'iva_acreditable': iva_acreditable_redondeado, 'iva_retenido': iva_retenido_redondeado,
+                'iva_favor_anterior': round(iva_favor_acumulado),
+                'iva_neto': abs(iva_neto), 'estatus_iva': estatus_iva
+            }
+            archivo_excel = generar_excel_formulado(df_ingresos, df_gastos if not df_gastos.empty else None, df_excluidos if not df_excluidos.empty else None, diccionario_totales)
+            st.download_button("📥 Descargar Papeles de Trabajo Formulados (.xlsx)", data=archivo_excel, file_name=f"Papel_Trabajo_{mes_sel}_{anio_sel}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
 # --- PESTAÑA 2: VISOR DE XML ---
 with tab_visor:
